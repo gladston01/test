@@ -1,1 +1,265 @@
 
+import pandas as pd
+import numpy as np
+import json
+import os
+import logging
+import argparse
+import random
+from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+BASELINE_FILE = "baseline_stats.json"
+
+def load_jtl(filepath):
+    if not os.path.exists(filepath):
+        logging.error(f"JTL file not found: {filepath}")
+        return None
+    col_names = [
+        "timeStamp","elapsed","label","responseCode","responseMessage",
+        "threadName","dataType","success","failureMessage","bytes","sentBytes",
+        "grpThreads","allThreads","URL","Latency","IdleTime","Connect"
+    ]
+    try:
+        df = pd.read_csv(filepath, names=col_names, header=0, dtype={'responseCode': 'object'}, low_memory=True)
+        df['success'] = df['success'].apply(lambda x: str(x).lower() == 'true')
+        df['timeStamp'] = pd.to_datetime(df['timeStamp'], unit='ms', errors='coerce')
+        df.dropna(subset=['timeStamp','elapsed','success'], inplace=True)
+        return df
+    except Exception as e:
+        logging.exception("Failed to read or process JTL file.")
+        return None
+
+def load_baseline():
+    if os.path.exists(BASELINE_FILE):
+        with open(BASELINE_FILE, 'r') as f:
+            return json.load(f)
+    else:
+        return {}
+
+def save_baseline(data):
+    with open(BASELINE_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def compute_incremental_stats(df):
+    result = {}
+    for label, group in df.groupby('label'):
+        arr = group['elapsed'].values
+        count = len(arr)
+        sum_elapsed = arr.sum()
+        sum_squares = (arr**2).sum()
+        errors = (~group['success']).sum()
+
+        result[label] = {
+            'count': count,
+            'sum': float(sum_elapsed),
+            'sum_of_squares': float(sum_squares),
+            'error_count': int(errors),
+            'start_time': group['timeStamp'].min(),
+            'end_time': group['timeStamp'].max(),
+            'sample': arr.tolist()
+        }
+    return result
+
+def calculate_tps(label_stats):
+    duration = (label_stats['end_time'] - label_stats['start_time']).total_seconds()
+    if duration > 0:
+        return label_stats['count'] / duration
+    return 0.0
+
+def update_baseline_with_run(baseline_data, run_stats, sample_size_per_label):
+    for label, stats in run_stats.items():
+        if label not in baseline_data:
+            baseline_data[label] = {
+                'count': 0, 'sum': 0.0, 'sum_of_squares': 0.0, 'error_count': 0,
+                'sample': [],
+                'total_tps': 0.0,
+                'runs': 0
+            }
+
+        # Update aggregates
+        baseline_data[label]['count'] += stats['count']
+        baseline_data[label]['sum'] += stats['sum']
+        baseline_data[label]['sum_of_squares'] += stats['sum_of_squares']
+        baseline_data[label]['error_count'] += stats['error_count']
+
+        # Update TPS
+        tps = calculate_tps(stats)
+        baseline_data[label]['total_tps'] += tps
+        baseline_data[label]['runs'] += 1
+
+        # Update sample
+        combined_sample = baseline_data[label]['sample'] + stats['sample']
+        if len(combined_sample) > sample_size_per_label:
+            combined_sample = random.sample(combined_sample, sample_size_per_label)
+        baseline_data[label]['sample'] = combined_sample
+
+        baseline_data[label]['last_updated'] = datetime.utcnow().isoformat() + "Z"
+    return baseline_data
+
+def compute_percentile_from_sample(sample, percentile=95):
+    if not sample:
+        return None
+    return float(np.percentile(sample, percentile))
+
+def analyze_current_run(current_stats, baseline_data, hard_avg_sla, hard_p95_sla, hard_error_sla, threshold_factor, error_rate_factor, tps_factor):
+    alerts = []
+    current_run_summary = []
+    missing_labels = []
+
+    for label, stats in current_stats.items():
+        curr_count = stats['count']
+        if curr_count == 0:
+            continue
+
+        curr_avg = stats['sum'] / curr_count
+        curr_err_rate = stats['error_count'] / curr_count
+        curr_p95 = compute_percentile_from_sample(stats['sample'], 95)
+        curr_tps = calculate_tps(stats)
+
+        sla_violations = []
+        context_violations = []
+        if curr_avg > hard_avg_sla:
+            sla_violations.append(f"Avg SLA breach: {curr_avg:.2f}ms > {hard_avg_sla}ms")
+            context_violations.append(f"Avg Response Time: {curr_avg:.2f}ms (Threshold: {hard_avg_sla}ms)")
+
+        if curr_p95 > hard_p95_sla:
+            sla_violations.append(f"95th percentile SLA breach: {curr_p95:.2f}ms > {hard_p95_sla}ms")
+            context_violations.append(f"95th Percentile: {curr_p95:.2f}ms (Threshold: {hard_p95_sla}ms)")
+
+        if curr_err_rate > hard_error_sla:
+            sla_violations.append(f"Error rate SLA breach: {curr_err_rate*100:.2f}% > {hard_error_sla*100:.2f}%")
+            context_violations.append(f"Error Rate: {curr_err_rate*100:.2f}% (Threshold: {hard_error_sla*100:.2f}%)")
+
+        # Historical comparison
+        hist_mean, hist_error_rate, hist_tps = None, None, None
+        if label in baseline_data and baseline_data[label]['count'] > 0:
+            b = baseline_data[label]
+            hist_mean = b['sum'] / b['count']
+            hist_error_rate = b['error_count'] / b['count']
+            hist_tps = b['total_tps'] / b['runs']
+
+            if curr_avg > hist_mean * threshold_factor:
+                sla_violations.append(
+                    f"Avg Response Time regression: {curr_avg:.2f}ms > {hist_mean*threshold_factor:.2f}ms (Threshold)"
+                )
+                context_violations.append(f"Avg Response Time: {curr_avg:.2f}ms (Historical: {hist_mean:.2f}ms)")
+
+            if hist_error_rate > 0 and curr_err_rate > hist_error_rate * error_rate_factor:
+                sla_violations.append(
+                    f"Error Rate regression: {curr_err_rate*100:.2f}% > {hist_error_rate*100*error_rate_factor:.2f}% (Threshold)"
+                )
+                context_violations.append(f"Error Rate: {curr_err_rate*100:.2f}% (Historical: {hist_error_rate*100:.2f}%)")
+
+            if curr_tps < hist_tps / tps_factor or curr_tps > hist_tps * tps_factor:
+                sla_violations.append(
+                    f"TPS deviation: {curr_tps:.2f} TPS significantly deviates from historical {hist_tps:.2f} TPS"
+                )
+                context_violations.append(f"TPS: {curr_tps:.2f} (Historical: {hist_tps:.2f})")
+        else:
+            missing_labels.append(label)
+
+        current_run_summary.append({
+            'label': label,
+            'current_avg': curr_avg,
+            'current_95p': curr_p95,
+            'current_error_%': curr_err_rate * 100,
+            'current_tps': curr_tps,
+            'historical_avg': hist_mean if hist_mean is not None else "N/A",
+            'historical_error_%': hist_error_rate * 100 if hist_error_rate is not None else "N/A",
+            'historical_tps': hist_tps if hist_tps is not None else "N/A",
+            'violations': "; ".join(sla_violations) if sla_violations else "None"
+        })
+
+        if context_violations:
+            alerts.append((label, context_violations))
+
+    return alerts, pd.DataFrame(current_run_summary), missing_labels
+
+def export_reports(df_summary, alerts, missing_labels, test_start, test_end, output_format, report_dir):
+    os.makedirs(report_dir, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    detailed_report_file = os.path.join(report_dir, f"report_{timestamp}.txt")
+    alerts_only_file = os.path.join(report_dir, f"alerts_{timestamp}.txt")
+
+    # Generate Detailed Report
+    with open(detailed_report_file, 'w') as f:
+        f.write(f"Test Start Time: {test_start}\n")
+        f.write(f"Test End Time: {test_end}\n\n")
+        if missing_labels:
+            f.write(f"Missing Labels: {', '.join(missing_labels)}\n\n")
+        f.write("Current Run Summary with Historical Comparisons:\n")
+        f.write(df_summary.to_string(index=False))
+    logging.info(f"Detailed report generated at: {detailed_report_file}")
+
+    # Generate Alerts-Only Report
+    with open(alerts_only_file, 'w') as f:
+        f.write(f"Test Start Time: {test_start}\n")
+        f.write(f"Test End Time: {test_end}\n\n")
+        if missing_labels:
+            f.write(f"Missing Labels: {', '.join(missing_labels)}\n\n")
+        if alerts:
+            f.write("Alerts Detected:\n")
+            for label, issues in alerts:
+                for issue in issues:
+                    f.write(f"{label}: {issue}\n")
+        else:
+            f.write("No SLA breaches or significant regressions detected.\n")
+    logging.info(f"Alerts-only report generated at: {alerts_only_file}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Analyze JTL Performance with Historical Baselines and Adaptive SLAs")
+
+    parser.add_argument("--jtl-file", type=str, required=True, help="Path to the new run's JTL file")
+    parser.add_argument("--hard-avg-sla", type=int, default=1000, help="Hard SLA for average (ms)")
+    parser.add_argument("--hard-p95-sla", type=int, default=3000, help="Hard SLA for 95th percentile (ms)")
+    parser.add_argument("--hard-error-sla", type=float, default=0.02, help="Hard SLA for error rate (fraction)")
+    parser.add_argument("--threshold-factor", type=float, default=1.5, help="Factor for detecting avg response time regressions")
+    parser.add_argument("--error-rate-factor", type=float, default=2.0, help="Factor for detecting error rate regressions")
+    parser.add_argument("--tps-factor", type=float, default=1.5, help="Factor for detecting TPS deviations")
+    parser.add_argument("--sample-size-per-label", type=int, default=1000, help="Size of rolling sample per label")
+    parser.add_argument("--output-format", type=str, choices=['csv', 'plain'], default='plain', help="Output format for report")
+    parser.add_argument("--report-dir", type=str, default="reports", help="Directory to store reports")
+
+    args = parser.parse_args()
+
+    # Load data
+    baseline_data = load_baseline()
+    current_df = load_jtl(args.jtl_file)
+    if current_df is None or current_df.empty:
+        logging.error("No data to process in current run. Exiting.")
+        exit(1)
+
+    test_start = current_df['timeStamp'].min()
+    test_end = current_df['timeStamp'].max()
+
+    # Compute stats and analyze
+    current_stats = compute_incremental_stats(current_df)
+    alerts, df_summary, missing_labels = analyze_current_run(
+        current_stats,
+        baseline_data,
+        args.hard_avg_sla,
+        args.hard_p95_sla,
+        args.hard_error_sla,
+        args.threshold_factor,
+        args.error_rate_factor,
+        args.tps_factor
+    )
+
+    if alerts:
+        logging.info("Alerts Detected:")
+        for label, issues in alerts:
+            for issue in issues:
+                logging.info(f"{label}: {issue}")
+
+    if missing_labels:
+        logging.warning(f"Labels missing from historical data: {', '.join(missing_labels)}")
+
+    # Update baseline and export reports
+    baseline_data = update_baseline_with_run(baseline_data, current_stats, args.sample_size_per_label)
+    save_baseline(baseline_data)
+
+    export_reports(df_summary, alerts, missing_labels, test_start, test_end, args.output_format, args.report_dir)
+    logging.info("Analysis completed successfully.")
