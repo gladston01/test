@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        FILE_LOCATION = 'C:\\path\\to\\your\\jtl\\files' // Directory where .jtl files are generated
-        DESTINATION_LOCATION = 'C:\\path\\to\\git\\repo' // Directory where the repository is cloned
+        FILE_LOCATION = 'D:\\path\\to\\your\\jtl\\files' // Directory where .jtl files are generated
+        DESTINATION_LOCATION = 'D:\\path\\to\\git\\repo' // Directory where the repository is cloned
         RENAMED_FILE = 'analysis.jtl' // New name for the copied file
     }
 
@@ -13,7 +13,15 @@ pipeline {
                 script {
                     // Find the most recently created .jtl file
                     def jtlFile = bat(
-                        script: "for /f \"delims=\" %%i in ('dir /b /o:d \"${env.FILE_LOCATION}\\*.jtl\"') do @echo %%i",
+                        script: """
+                            @echo off
+                            pushd "${env.FILE_LOCATION}"
+                            for /f "delims=" %%i in ('dir /b /o:-d *.jtl') do (
+                                echo %%i
+                                exit /b
+                            )
+                            popd
+                        """,
                         returnStdout: true
                     ).trim()
 
