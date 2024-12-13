@@ -1,1 +1,72 @@
+pipeline {
+    agent any
+
+    environment {
+        FILE_LOCATION = '/path/to/your/jtl/files' // Directory where .jtl files are generated
+        DESTINATION_LOCATION = '/path/to/git/repo' // Directory where the repository is cloned
+        RENAMED_FILE = 'analysis.jtl' // New name for the copied file
+    }
+
+    stages {
+        stage('Find Latest JTL File') {
+            steps {
+                script {
+                    // Find the most recently created .jtl file
+                    def jtlFile = sh(
+                        script: "find ${env.FILE_LOCATION} -type f -name '*.jtl' -printf '%T@ %p\\n' | sort -n | tail -1 | cut -d' ' -f2",
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (!jtlFile) {
+                        error "No .jtl files found in ${env.FILE_LOCATION}"
+                    }
+
+                    env.LATEST_JTL_FILE = jtlFile
+                    echo "Found latest JTL file: ${env.LATEST_JTL_FILE}"
+                }
+            }
+        }
+
+        stage('Copy and Rename File') {
+            steps {
+                script {
+                    // Remove existing analysis.jtl if it exists
+                    sh """
+                        if [ -f ${env.DESTINATION_LOCATION}/${env.RENAMED_FILE} ]; then
+                            rm ${env.DESTINATION_LOCATION}/${env.RENAMED_FILE}
+                        fi
+
+                        # Copy the latest file and rename it
+                        cp ${env.LATEST_JTL_FILE} ${env.DESTINATION_LOCATION}/${env.RENAMED_FILE}
+                    """
+                    echo "Copied and renamed ${env.LATEST_JTL_FILE} to ${env.DESTINATION_LOCATION}/${env.RENAMED_FILE}"
+                }
+            }
+        }
+
+        stage('Commit and Push to GitLab') {
+            steps {
+                script {
+                    // Navigate to the repository directory and push changes
+                    sh """
+                        cd ${env.DESTINATION_LOCATION}
+
+                        # Configure Git user details
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@example.com"
+
+                        # Add the renamed file to the staging area
+                        git add ${env.RENAMED_FILE}
+
+                        # Commit the file with a message
+                        git commit -m "Automated upload of ${env.RENAMED_FILE}" || echo "No changes to commit"
+
+                        # Push the changes
+                        git push
+                    """
+                }
+            }
+        }
+    }
+}
 
