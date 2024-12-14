@@ -43,27 +43,53 @@ pipeline {
                     // Extract details for Slack notification
                     def startTime = alertContent.find(/(?<=Test Start Time: ).*/)
                     def endTime = alertContent.find(/(?<=Test End Time: ).*/)
-                    def alertsDetected = alertContent.find(/(?<=Alerts Detected:\\r?\\n).*/s)?.trim()
+                    def alertsSection = alertContent.split("Alerts Detected:")[1]?.trim()
+                    def missingLabels = alertContent.find(/(?<=Missing Labels: ).*/)
+                    def noBreachesMessage = alertContent.find(/NO SLA breaches or significant regressions detected\./)
 
-                    if (!startTime || !endTime || !alertsDetected) {
-                        error "Failed to extract alert details from the file: ${env.ALERT_FILE_PATH}"
+                    def slackMessage = ""
+
+                    // Determine message severity and construct Slack message
+                    if (noBreachesMessage) {
+                        slackMessage = """
+                            *Test Summary*: :white_check_mark: 
+                            *Test Start Time:* ${startTime}
+                            *Test End Time:* ${endTime}
+                            ${noBreachesMessage}
+                        """
+                        slackSend(
+                            channel: env.SLACK_CHANNEL,
+                            color: 'good',
+                            message: slackMessage
+                        )
+                    } else if (alertsSection) {
+                        slackMessage = """
+                            *Test Alert Notification* :rotating_light:
+                            *Test Start Time:* ${startTime}
+                            *Test End Time:* ${endTime}
+                            *Alerts Detected:*
+                            ${alertsSection}
+                        """
+                        slackSend(
+                            channel: env.SLACK_CHANNEL,
+                            color: 'danger',
+                            message: slackMessage
+                        )
                     }
 
-                    // Prepare Slack message
-                    def slackMessage = """
-                        *Test Alert Notification* :rotating_light:
-                        *Test Start Time:* ${startTime}
-                        *Test End Time:* ${endTime}
-                        *Alerts Detected:*
-                        ${alertsDetected}
-                    """
-
-                    // Send notification to Slack
-                    slackSend(
-                        channel: env.SLACK_CHANNEL,
-                        color: 'danger',
-                        message: slackMessage
-                    )
+                    if (missingLabels) {
+                        slackMessage = """
+                            *Missing Labels Detected*: :warning:
+                            *Test Start Time:* ${startTime}
+                            *Test End Time:* ${endTime}
+                            *Missing Labels:* ${missingLabels}
+                        """
+                        slackSend(
+                            channel: env.SLACK_CHANNEL,
+                            color: 'warning',
+                            message: slackMessage
+                        )
+                    }
 
                     echo "Slack notification sent successfully."
                 }
