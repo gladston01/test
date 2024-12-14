@@ -1,99 +1,16 @@
-pipeline {
-    agent any
+def alertsFile = "${env.WORKSPACE}/alerts.txt"
 
-    environment {
-        ALERT_FILE_LOCATION = 'D:\\path\\to\\alert\\files' // Directory where alert files are stored
-        SLACK_CHANNEL = '#alerts' // Slack channel to send the notification
-    }
+// Write the alerts to a file
+writeFile file: alertsFile, text: alertsSection
 
-    stages {
-        stage('Find Latest Alert File') {
-            steps {
-                script {
-                    // Find the most recent file with "alert" in its name
-                    def alertFile = bat(
-                        script: """
-                            @echo off
-                            pushd "${env.ALERT_FILE_LOCATION}"
-                            for /f "delims=" %%i in ('dir /b /o:-d *alert*.txt') do (
-                                echo %%i
-                                exit /b
-                            )
-                            popd
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    if (!alertFile) {
-                        error "No alert files found in ${env.ALERT_FILE_LOCATION}"
-                    }
-
-                    env.ALERT_FILE_PATH = "${env.ALERT_FILE_LOCATION}\\${alertFile}"
-                    echo "Found latest alert file: ${env.ALERT_FILE_PATH}"
-                }
-            }
-        }
-
-        stage('Read and Send Slack Notification') {
-            steps {
-                script {
-                    // Read the alert file content
-                    def alertContent = readFile(env.ALERT_FILE_PATH)
-                    
-                    // Extract details for Slack notification
-                    def startTime = alertContent.find(/(?<=Test Start Time: ).*/)
-                    def endTime = alertContent.find(/(?<=Test End Time: ).*/)
-                    def alertsSection = alertContent.split("Alerts Detected:")[1]?.trim()
-                    def missingLabels = alertContent.find(/(?<=Missing Labels: ).*/)
-                    def noBreachesMessage = alertContent.find(/NO SLA breaches or significant regressions detected\./)
-
-                    def slackMessage = ""
-
-                    // Determine message severity and construct Slack message
-                    if (noBreachesMessage) {
-                        slackMessage = """
-                            *Test Summary*: :white_check_mark: 
-                            *Test Start Time:* ${startTime}
-                            *Test End Time:* ${endTime}
-                            ${noBreachesMessage}
-                        """
-                        slackSend(
-                            channel: env.SLACK_CHANNEL,
-                            color: 'good',
-                            message: slackMessage
-                        )
-                    } else if (alertsSection) {
-                        slackMessage = """
-                            *Test Alert Notification* :rotating_light:
-                            *Test Start Time:* ${startTime}
-                            *Test End Time:* ${endTime}
-                            *Alerts Detected:*
-                            ${alertsSection}
-                        """
-                        slackSend(
-                            channel: env.SLACK_CHANNEL,
-                            color: 'danger',
-                            message: slackMessage
-                        )
-                    }
-
-                    if (missingLabels) {
-                        slackMessage = """
-                            *Missing Labels Detected*: :warning:
-                            *Test Start Time:* ${startTime}
-                            *Test End Time:* ${endTime}
-                            *Missing Labels:* ${missingLabels}
-                        """
-                        slackSend(
-                            channel: env.SLACK_CHANNEL,
-                            color: 'warning',
-                            message: slackMessage
-                        )
-                    }
-
-                    echo "Slack notification sent successfully."
-                }
-            }
-        }
-    }
-}
+// Upload the file to Slack
+slackUploadFile(
+    channel: env.SLACK_CHANNEL,
+    filePath: alertsFile,
+    initialComment: """
+        *Test Alert Notification*: :rotating_light:
+        *Test Start Time:* ${startTime}
+        *Test End Time:* ${endTime}
+        The alerts are too large to send as a message. Please check the attached file.
+    """
+)
