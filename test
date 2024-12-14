@@ -1,16 +1,44 @@
-def alertsFile = "${env.WORKSPACE}/alerts.txt"
+def maxMessageLength = 3900
 
-// Write the alerts to a file
-writeFile file: alertsFile, text: alertsSection
+if (alertsSection?.length() > maxMessageLength) {
+    def chunks = []
+    def currentChunk = new StringBuilder()
 
-// Upload the file to Slack
-slackUploadFile(
-    channel: env.SLACK_CHANNEL,
-    filePath: alertsFile,
-    initialComment: """
+    alertsSection.split("\n").each { line ->
+        // Check if adding the next line would exceed the max length
+        if (currentChunk.length() + line.length() + 1 > maxMessageLength) {
+            // Save the current chunk and start a new one
+            chunks.add(currentChunk.toString())
+            currentChunk = new StringBuilder()
+        }
+        // Add the line to the current chunk
+        currentChunk.append(line).append("\n")
+    }
+
+    // Add the final chunk if there's remaining content
+    if (currentChunk.length() > 0) {
+        chunks.add(currentChunk.toString())
+    }
+
+    // Send each chunk as a separate Slack message
+    chunks.eachWithIndex { chunk, index ->
+        def slackMessage = """
+            *Test Alert Notification (Part ${index + 1}/${chunks.size()}):* :rotating_light:
+            *Test Start Time:* ${startTime}
+            *Test End Time:* ${endTime}
+            *Alerts Detected:*
+            ${chunk.trim()}
+        """
+        slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: slackMessage)
+    }
+} else {
+    // Send a single message if it's under the limit
+    def slackMessage = """
         *Test Alert Notification*: :rotating_light:
         *Test Start Time:* ${startTime}
         *Test End Time:* ${endTime}
-        The alerts are too large to send as a message. Please check the attached file.
+        *Alerts Detected:*
+        ${alertsSection}
     """
-)
+    slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: slackMessage)
+}
