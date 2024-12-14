@@ -18,7 +18,7 @@ def jsonResponse1 = jsonResponse.data
 
 // Helper function to check if all fields in a row are empty
 def isRowEmpty(row) {
-    return row.values().every { it == "" || it == null }
+    return row instanceof Map && row.values().every { it == "" || it == null }
 }
 
 // Check if all rows are empty
