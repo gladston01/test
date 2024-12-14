@@ -13,16 +13,26 @@ def response = prev.getResponseDataAsString()
 def jsonSlurper = new JsonSlurper()
 def jsonResponse = jsonSlurper.parseText(response)
 
-// Extract the "data" array (assuming it is an array of objects)
+// Extract the "data" array
 def jsonResponse1 = jsonResponse.data
 
-// Check if "data" is null or empty to control the loop
-if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
+// Helper function to check if all fields in a row are empty
+def isRowEmpty(row) {
+    return row.values().every { it == "" || it == null }
+}
+
+// Check if all rows are empty
+def allRowsEmpty = jsonResponse1 != null && jsonResponse1.every { row ->
+    isRowEmpty(row)
+}
+
+// Control the loop based on whether all rows are empty
+if (jsonResponse1 == null || jsonResponse1.isEmpty() || allRowsEmpty) {
     vars.put("continueLoop", "false")  // Stop the loop
-    log.info("No more data. Setting continueLoop to false.")
+    log.info("No more valid data. Setting continueLoop to false.")
 } else {
     vars.put("continueLoop", "true")   // Continue the loop
-    log.info("Data found. Setting continueLoop to true.")
+    log.info("Valid data found. Setting continueLoop to true.")
 
     // Create the CSV file if it doesn't exist
     if (!Files.exists(Paths.get(csvFilePath))) {
@@ -37,7 +47,7 @@ if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
     jsonResponse1.each { row ->
         if (row instanceof Map) {  // Ensure the row is a Map object
             // Convert the row map values to a comma-separated string
-            def csvRow = row.values().join(",") + "\n"
+            def csvRow = row.values().collect { it == null ? "" : it }.join(",") + "\n"
             
             // Append the row to the CSV file
             Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
