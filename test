@@ -27,12 +27,13 @@ def parse_time(input_time):
 
 def query_pgsql(start_time, end_time, db_config):
     """
-    Queries the PostgreSQL database for services and their duration metrics.
+    Queries the PostgreSQL database for services, domains, legs, and their duration metrics.
     """
     sql_query = """
     SELECT 
         service,
         domain,
+        leg,
         "timestamp",
         messagedurations,
         requestdurations,
@@ -96,24 +97,24 @@ def save_historic_sla(historic_sla):
 def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_sla=1000, sensitivity_factor=2, num_runs=5):
     """
     Detects spikes where duration values exceed hard SLA, moving average, or standard deviation thresholds.
-    Generates a detailed report and an alerts file.
+    Generates a detailed report and separate alerts files for each metric.
     """
     # Ensure reports folder exists
     os.makedirs(REPORTS_FOLDER, exist_ok=True)
 
     # Melt the dataframe to bring durations into a single column
     melted_df = df.melt(
-        id_vars=["service", "domain", "timestamp"],
+        id_vars=["service", "domain", "leg", "timestamp"],
         value_vars=["messagedurations", "requestdurations", "responsedurations", "serverdurations"],
         var_name="duration_type",
         value_name="value"
     )
 
     spike_report = []
-    alert_report = []
+    alert_reports = {metric: [] for metric in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]}
     for service in melted_df["service"].unique():
         service_df = melted_df[melted_df["service"] == service]
-        for duration_type in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]:
+        for duration_type in alert_reports.keys():
             duration_df = service_df[service_df["duration_type"] == duration_type]
 
             if service in historic_sla and duration_type in historic_sla[service]:
@@ -163,20 +164,22 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
 
             if sudden_spike_detected:
                 spike_detected = True
-                spike_reason.append(f"Spike detected between {sudden_spike_start} and {sudden_spike_end}, reaching {max_value}ms")
+                if sudden_spike_start == sudden_spike_end:
+                    spike_reason.append(f"Sudden Spike at {sudden_spike_start}, reaching {max_value}ms")
+                else:
+                    spike_reason.append(f"Spike between {sudden_spike_start} and {sudden_spike_end}, reaching {max_value}ms")
 
             # Log spike report
             if spike_detected:
                 spike_report.append(
-                    f"Service: {service}, Domain: {row['domain']}, Metric: {duration_type}, "
+                    f"Service: {service}, Domain: {row['domain']}, Leg: {row['leg']}, Metric: {duration_type}, "
                     f"Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
                 )
 
-                # Alert entry
-                alert_report.append(
-                    f"Timestamp: {sudden_spike_start if sudden_spike_detected else row['timestamp']}, "
-                    f"Service: {service}, Domain: {row['domain']}, Metric: {duration_type}, "
-                    f"Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
+                # Metric-specific alert entry
+                alert_reports[duration_type].append(
+                    f"Timestamp: {row['timestamp']}, Service: {service}, Domain: {row['domain']}, Leg: {row['leg']}, "
+                    f"Metric: {duration_type}, Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
                 )
 
             # Update historic SLA
@@ -198,15 +201,17 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
             f.write("No SLA breaches detected.\n")
             print("No SLA breaches detected.")
 
-    # Write alert report
-    with open(output_alerts, "w") as f:
-        if alert_report:
-            f.write("Alerts Detected:\n")
-            f.write("\n".join(alert_report))
-            print(f"Alerts logged to {output_alerts}")
-        else:
-            f.write("No Alerts Detected.\n")
-            print("No Alerts Detected.")
+    # Write separate alert files for each metric
+    for metric, alerts in alert_reports.items():
+        metric_alert_file = os.path.join(REPORTS_FOLDER, f"DP_Alerts_{metric}.txt")
+        with open(metric_alert_file, "w") as f:
+            if alerts:
+                f.write("Alerts Detected:\n")
+                f.write("\n".join(alerts))
+                print(f"Alerts for {metric} logged to {metric_alert_file}")
+            else:
+                f.write("No Alerts Detected.\n")
+                print(f"No Alerts Detected for {metric}.")
 
 
 if __name__ == "__main__":
@@ -236,8 +241,8 @@ if __name__ == "__main__":
         historic_sla = load_historic_sla()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_report = os.path.join(REPORTS_FOLDER, f"DP_Analysis_{timestamp}.txt")
-        output_alerts = os.path.join(REPORTS_FOLDER, f"DP_Alerts_{timestamp}.txt")
-        detect_spikes_and_log(result_df, historic_sla, output_report, output_alerts)
+        detect_spikes_and_log(result_df, historic_sla, output_report, REPORTS_FOLDER)
         save_historic_sla(historic_sla)
     else:
         print("No data found for the given time range.")
+``
