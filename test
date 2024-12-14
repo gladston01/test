@@ -2,21 +2,20 @@ pipeline {
     agent any
 
     environment {
-        FILE_LOCATION = 'D:\\path\\to\\your\\jtl\\files' // Directory where .jtl files are generated
-        DESTINATION_LOCATION = 'D:\\path\\to\\git\\repo' // Directory where the repository is cloned
-        RENAMED_FILE = 'analysis.jtl' // New name for the copied file
+        ALERT_FILE_LOCATION = 'D:\\path\\to\\alert\\files' // Directory where alert files are stored
+        SLACK_CHANNEL = '#alerts' // Slack channel to send the notification
     }
 
     stages {
-        stage('Find Latest JTL File') {
+        stage('Find Latest Alert File') {
             steps {
                 script {
-                    // Find the most recently created .jtl file
-                    def jtlFile = bat(
+                    // Find the most recent file with "alert" in its name
+                    def alertFile = bat(
                         script: """
                             @echo off
-                            pushd "${env.FILE_LOCATION}"
-                            for /f "delims=" %%i in ('dir /b /o:-d *.jtl') do (
+                            pushd "${env.ALERT_FILE_LOCATION}"
+                            for /f "delims=" %%i in ('dir /b /o:-d *alert*.txt') do (
                                 echo %%i
                                 exit /b
                             )
@@ -25,49 +24,48 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    if (!jtlFile) {
-                        error "No .jtl files found in ${env.FILE_LOCATION}"
+                    if (!alertFile) {
+                        error "No alert files found in ${env.ALERT_FILE_LOCATION}"
                     }
 
-                    env.LATEST_JTL_FILE = "${env.FILE_LOCATION}\\${jtlFile}"
-                    echo "Found latest JTL file: ${env.LATEST_JTL_FILE}"
+                    env.ALERT_FILE_PATH = "${env.ALERT_FILE_LOCATION}\\${alertFile}"
+                    echo "Found latest alert file: ${env.ALERT_FILE_PATH}"
                 }
             }
         }
 
-        stage('Copy and Rename File') {
+        stage('Read and Send Slack Notification') {
             steps {
                 script {
-                    // Remove existing analysis.jtl if it exists and copy the new file
-                    bat """
-                        if exist "${env.DESTINATION_LOCATION}\\${env.RENAMED_FILE}" del "${env.DESTINATION_LOCATION}\\${env.RENAMED_FILE}"
-                        copy "${env.LATEST_JTL_FILE}" "${env.DESTINATION_LOCATION}\\${env.RENAMED_FILE}"
+                    // Read the alert file content
+                    def alertContent = readFile(env.ALERT_FILE_PATH)
+                    
+                    // Extract details for Slack notification
+                    def startTime = alertContent.find(/(?<=Test Start Time: ).*/)
+                    def endTime = alertContent.find(/(?<=Test End Time: ).*/)
+                    def alertsDetected = alertContent.find(/(?<=Alerts Detected:\\r?\\n).*/s)?.trim()
+
+                    if (!startTime || !endTime || !alertsDetected) {
+                        error "Failed to extract alert details from the file: ${env.ALERT_FILE_PATH}"
+                    }
+
+                    // Prepare Slack message
+                    def slackMessage = """
+                        *Test Alert Notification* :rotating_light:
+                        *Test Start Time:* ${startTime}
+                        *Test End Time:* ${endTime}
+                        *Alerts Detected:*
+                        ${alertsDetected}
                     """
-                    echo "Copied and renamed ${env.LATEST_JTL_FILE} to ${env.DESTINATION_LOCATION}\\${env.RENAMED_FILE}"
-                }
-            }
-        }
 
-        stage('Commit and Push to GitLab') {
-            steps {
-                script {
-                    // Navigate to the repository directory and push changes
-                    bat """
-                        cd /d ${env.DESTINATION_LOCATION}
+                    // Send notification to Slack
+                    slackSend(
+                        channel: env.SLACK_CHANNEL,
+                        color: 'danger',
+                        message: slackMessage
+                    )
 
-                        REM Configure Git user details
-                        git config user.name "Jenkins"
-                        git config user.email "jenkins@example.com"
-
-                        REM Add the renamed file to the staging area
-                        git add ${env.RENAMED_FILE}
-
-                        REM Commit the file with a message
-                        git commit -m "Automated upload of ${env.RENAMED_FILE}" || echo No changes to commit
-
-                        REM Push the changes
-                        git push
-                    """
+                    echo "Slack notification sent successfully."
                 }
             }
         }
