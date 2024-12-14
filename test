@@ -110,7 +110,7 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
     )
 
     spike_report = []
-    alerts = []
+    alert_report = []
     for service in melted_df["service"].unique():
         service_df = melted_df[melted_df["service"] == service]
         for duration_type in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]:
@@ -137,13 +137,13 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
             # Hard SLA check
             if max_value > hard_sla:
                 spike_detected = True
-                spike_reason.append(f"Exceeds Hard SLA: {hard_sla}ms")
+                spike_reason.append(f"Exceeds Hard SLA of {hard_sla}ms")
 
             # Moving Average + Standard Deviation Check
             if max_value > moving_avg + sensitivity_factor * std_dev:
                 spike_detected = True
                 spike_reason.append(
-                    f"Exceeds Moving Avg + {sensitivity_factor} * Std Dev: {moving_avg + sensitivity_factor * std_dev:.2f}ms"
+                    f"Exceeds Moving Avg of {moving_avg:.2f}ms + {sensitivity_factor} * Std Dev: {std_dev:.2f}ms"
                 )
 
             # Sudden Spike Detection
@@ -163,7 +163,7 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
 
             if sudden_spike_detected:
                 spike_detected = True
-                spike_reason.append(f"Sudden Spike Detected from {sudden_spike_start} to {sudden_spike_end}")
+                spike_reason.append(f"Spike detected between {sudden_spike_start} and {sudden_spike_end}, reaching {max_value}ms")
 
             # Log spike report
             if spike_detected:
@@ -172,17 +172,11 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
                     f"Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
                 )
 
-                # Alerts entry
-                alerts.append(
-                    {
-                        "timestamp": sudden_spike_start if sudden_spike_detected else row["timestamp"],
-                        "service": service,
-                        "domain": row["domain"],
-                        "exceeded_hard_sla": max_value > hard_sla,
-                        "max_value": max_value,
-                        "deviation_from_historic": max_value > moving_avg + sensitivity_factor * std_dev,
-                        "sudden_spike": f"{sudden_spike_start} to {sudden_spike_end}" if sudden_spike_detected else None
-                    }
+                # Alert entry
+                alert_report.append(
+                    f"Timestamp: {sudden_spike_start if sudden_spike_detected else row['timestamp']}, "
+                    f"Service: {service}, Domain: {row['domain']}, Metric: {duration_type}, "
+                    f"Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
                 )
 
             # Update historic SLA
@@ -194,26 +188,21 @@ def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_s
                 historic_sla[service][duration_type]["max_values"][-(num_runs - 1):] + [max_value]
             )
 
-    # Write report to file
+    # Write detailed report
     with open(output_report, "w") as f:
         if spike_report:
             f.write("Detailed Report:\n")
             f.write("\n".join(spike_report))
-            print(f"Report logged to {output_report}")
+            print(f"Detailed report logged to {output_report}")
         else:
             f.write("No SLA breaches detected.\n")
             print("No SLA breaches detected.")
 
-    # Write alerts to file
+    # Write alert report
     with open(output_alerts, "w") as f:
-        if alerts:
-            f.write("timestamp,service,domain,exceeded_hard_sla,max_value,deviation_from_historic,sudden_spike\n")
-            for alert in alerts:
-                f.write(
-                    f"{alert['timestamp']},{alert['service']},{alert['domain']},"
-                    f"{alert['exceeded_hard_sla']},{alert['max_value']},"
-                    f"{alert['deviation_from_historic']},{alert['sudden_spike']}\n"
-                )
+        if alert_report:
+            f.write("Alerts Detected:\n")
+            f.write("\n".join(alert_report))
             print(f"Alerts logged to {output_alerts}")
         else:
             f.write("No Alerts Detected.\n")
