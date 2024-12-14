@@ -27,12 +27,12 @@ log.info("Processing loop iteration: ${loopCounter}")
 if (!Files.exists(Paths.get(csvFilePath))) {
     Files.createFile(Paths.get(csvFilePath))
     
-    // Write the header row to the CSV (use keys from the first row of data)
-    if (jsonResponse1 != null && !jsonResponse1.isEmpty()) {
+    // Write the header row to the CSV (use keys from the first row of data if available)
+    if (jsonResponse1 != null && !jsonResponse1.isEmpty() && jsonResponse1[0] instanceof Map) {
         def header = jsonResponse1[0].keySet().join(",") + "\n"
         Files.write(Paths.get(csvFilePath), header.getBytes(), StandardOpenOption.APPEND)
     } else {
-        log.warn("No data in the response to determine header.")
+        log.warn("No valid data in the response to determine header.")
     }
 }
 
@@ -44,7 +44,7 @@ if (jsonResponse1 != null && !jsonResponse1.isEmpty()) {
             Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
             log.info("Row written to CSV: ${csvRow.trim()}")
         } else {
-            log.warn("Skipping non-Map row: ${row}")
+            log.warn("Skipping non-Map row: ${row.getClass().name} - ${row}")
         }
     }
 } else {
