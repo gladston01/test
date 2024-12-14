@@ -6,8 +6,8 @@ import argparse
 import os
 import numpy as np
 
-
 HISTORIC_SLA_FILE = "historic_sla.json"
+REPORTS_FOLDER = "reports"
 
 
 def parse_time(input_time):
@@ -83,9 +83,6 @@ def save_historic_sla(historic_sla):
     Saves historic SLA values to a JSON file.
     """
     def convert_numpy(obj):
-        """
-        Convert numpy data types to native Python types for JSON serialization.
-        """
         if isinstance(obj, (np.int64, np.int32)):
             return int(obj)
         elif isinstance(obj, (np.float64, np.float32)):
@@ -96,10 +93,14 @@ def save_historic_sla(historic_sla):
         json.dump(historic_sla, file, indent=4, default=convert_numpy)
 
 
-def detect_spikes_and_log(df, historic_sla, output_file, hard_sla=1000, sensitivity_factor=2, num_runs=5):
+def detect_spikes_and_log(df, historic_sla, output_report, output_alerts, hard_sla=1000, sensitivity_factor=2, num_runs=5):
     """
     Detects spikes where duration values exceed hard SLA, moving average, or standard deviation thresholds.
+    Generates a detailed report and an alerts file.
     """
+    # Ensure reports folder exists
+    os.makedirs(REPORTS_FOLDER, exist_ok=True)
+
     # Melt the dataframe to bring durations into a single column
     melted_df = df.melt(
         id_vars=["service", "domain", "timestamp"],
@@ -109,13 +110,13 @@ def detect_spikes_and_log(df, historic_sla, output_file, hard_sla=1000, sensitiv
     )
 
     spike_report = []
+    alerts = []
     for service in melted_df["service"].unique():
         service_df = melted_df[melted_df["service"] == service]
         for duration_type in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]:
             duration_df = service_df[service_df["duration_type"] == duration_type]
 
             if service in historic_sla and duration_type in historic_sla[service]:
-                # Retrieve historic SLA values for moving average and standard deviation
                 historic_max_values = historic_sla[service][duration_type].get("max_values", [])
                 if len(historic_max_values) > 0:
                     moving_avg = sum(historic_max_values) / len(historic_max_values)
@@ -126,53 +127,97 @@ def detect_spikes_and_log(df, historic_sla, output_file, hard_sla=1000, sensitiv
                     moving_avg = 0
                     std_dev = 0
             else:
-                # Default to hard SLA if no historic data exists
                 moving_avg = 0
                 std_dev = 0
 
-            for _, row in duration_df.iterrows():
-                spike_detected = False
-                spike_reason = []
-
-                # Hard SLA check
-                if row["value"] > hard_sla:
-                    spike_detected = True
-                    spike_reason.append(f"Exceeds Hard SLA: {hard_sla}ms")
-
-                # Moving Average + Standard Deviation Check
-                if row["value"] > moving_avg + sensitivity_factor * std_dev:
-                    spike_detected = True
-                    spike_reason.append(
-                        f"Exceeds Moving Avg + {sensitivity_factor} * Std Dev: {moving_avg + sensitivity_factor * std_dev:.2f}ms"
-                    )
-
-                # Log the spike if detected
-                if spike_detected:
-                    spike_report.append(
-                        f"Service: {row['service']}, Domain: {row['domain']}, Metric: {duration_type}, "
-                        f"Timestamp: {row['timestamp']}, Value: {row['value']}, "
-                        f"Moving Avg: {moving_avg:.2f}, Std Dev: {std_dev:.2f}, Hard SLA: {hard_sla}, Reasons: {', '.join(spike_reason)}"
-                    )
-
-            # Update historic SLA with the maximum value of the current run
             max_value = duration_df["value"].max()
+            spike_detected = False
+            spike_reason = []
+
+            # Hard SLA check
+            if max_value > hard_sla:
+                spike_detected = True
+                spike_reason.append(f"Exceeds Hard SLA: {hard_sla}ms")
+
+            # Moving Average + Standard Deviation Check
+            if max_value > moving_avg + sensitivity_factor * std_dev:
+                spike_detected = True
+                spike_reason.append(
+                    f"Exceeds Moving Avg + {sensitivity_factor} * Std Dev: {moving_avg + sensitivity_factor * std_dev:.2f}ms"
+                )
+
+            # Sudden Spike Detection
+            sudden_spike_detected = False
+            sudden_spike_start = None
+            sudden_spike_end = None
+            previous_value = None
+            for idx, row in duration_df.iterrows():
+                if previous_value is not None and abs(row["value"] - previous_value) > 400:  # Sudden increase
+                    if not sudden_spike_detected:
+                        sudden_spike_start = row["timestamp"]
+                        sudden_spike_detected = True
+                    sudden_spike_end = row["timestamp"]
+                elif sudden_spike_detected:
+                    break  # Spike ended
+                previous_value = row["value"]
+
+            if sudden_spike_detected:
+                spike_detected = True
+                spike_reason.append(f"Sudden Spike Detected from {sudden_spike_start} to {sudden_spike_end}")
+
+            # Log spike report
+            if spike_detected:
+                spike_report.append(
+                    f"Service: {service}, Domain: {row['domain']}, Metric: {duration_type}, "
+                    f"Max Value: {max_value}, Reasons: {', '.join(spike_reason)}"
+                )
+
+                # Alerts entry
+                alerts.append(
+                    {
+                        "timestamp": sudden_spike_start if sudden_spike_detected else row["timestamp"],
+                        "service": service,
+                        "domain": row["domain"],
+                        "exceeded_hard_sla": max_value > hard_sla,
+                        "max_value": max_value,
+                        "deviation_from_historic": max_value > moving_avg + sensitivity_factor * std_dev,
+                        "sudden_spike": f"{sudden_spike_start} to {sudden_spike_end}" if sudden_spike_detected else None
+                    }
+                )
+
+            # Update historic SLA
             if service not in historic_sla:
                 historic_sla[service] = {}
             if duration_type not in historic_sla[service]:
                 historic_sla[service][duration_type] = {"max_values": []}
             historic_sla[service][duration_type]["max_values"] = (
                 historic_sla[service][duration_type]["max_values"][-(num_runs - 1):] + [max_value]
-            )  # Keep only the last `num_runs` maximum values
+            )
 
-    # Write to TXT file
-    with open(output_file, "w") as f:
+    # Write report to file
+    with open(output_report, "w") as f:
         if spike_report:
-            f.write("Alerts Detected:\n")
+            f.write("Detailed Report:\n")
             f.write("\n".join(spike_report))
-            print(f"Spikes logged to {output_file}")
+            print(f"Report logged to {output_report}")
         else:
             f.write("No SLA breaches detected.\n")
             print("No SLA breaches detected.")
+
+    # Write alerts to file
+    with open(output_alerts, "w") as f:
+        if alerts:
+            f.write("timestamp,service,domain,exceeded_hard_sla,max_value,deviation_from_historic,sudden_spike\n")
+            for alert in alerts:
+                f.write(
+                    f"{alert['timestamp']},{alert['service']},{alert['domain']},"
+                    f"{alert['exceeded_hard_sla']},{alert['max_value']},"
+                    f"{alert['deviation_from_historic']},{alert['sudden_spike']}\n"
+                )
+            print(f"Alerts logged to {output_alerts}")
+        else:
+            f.write("No Alerts Detected.\n")
+            print("No Alerts Detected.")
 
 
 if __name__ == "__main__":
@@ -201,8 +246,9 @@ if __name__ == "__main__":
     if result_df is not None and not result_df.empty:
         historic_sla = load_historic_sla()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"alerts_{timestamp}.txt"
-        detect_spikes_and_log(result_df, historic_sla, output_file)
+        output_report = os.path.join(REPORTS_FOLDER, f"DP_Analysis_{timestamp}.txt")
+        output_alerts = os.path.join(REPORTS_FOLDER, f"DP_Alerts_{timestamp}.txt")
+        detect_spikes_and_log(result_df, historic_sla, output_report, output_alerts)
         save_historic_sla(historic_sla)
     else:
         print("No data found for the given time range.")
