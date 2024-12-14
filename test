@@ -18,10 +18,11 @@ def jsonResponse1 = jsonResponse.data
 
 // Helper function to check if all fields in a row are empty
 def isRowEmpty(row) {
-    return row instanceof Map && row.values().every { it == "" || it == null }
+    // Check if the row is a Map and if all values are null or empty
+    return row instanceof Map && row.values().every { it == null || it.toString().trim().isEmpty() }
 }
 
-// Check if all rows are empty
+// Check if all rows in the "data" array are empty
 def allRowsEmpty = jsonResponse1 != null && jsonResponse1.every { row ->
     isRowEmpty(row)
 }
@@ -29,7 +30,7 @@ def allRowsEmpty = jsonResponse1 != null && jsonResponse1.every { row ->
 // Control the loop based on whether all rows are empty
 if (jsonResponse1 == null || jsonResponse1.isEmpty() || allRowsEmpty) {
     vars.put("continueLoop", "false")  // Stop the loop
-    log.info("No more valid data. Setting continueLoop to false.")
+    log.info("All rows are empty or no data. Setting continueLoop to false.")
 } else {
     vars.put("continueLoop", "true")   // Continue the loop
     log.info("Valid data found. Setting continueLoop to true.")
@@ -47,7 +48,7 @@ if (jsonResponse1 == null || jsonResponse1.isEmpty() || allRowsEmpty) {
     jsonResponse1.each { row ->
         if (row instanceof Map) {  // Ensure the row is a Map object
             // Convert the row map values to a comma-separated string
-            def csvRow = row.values().collect { it == null ? "" : it }.join(",") + "\n"
+            def csvRow = row.values().collect { it == null ? "" : it.toString().trim() }.join(",") + "\n"
             
             // Append the row to the CSV file
             Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
