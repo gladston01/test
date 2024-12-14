@@ -19,8 +19,10 @@ def jsonResponse1 = jsonResponse.data
 // Check if "data" is null or empty to control the loop
 if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
     vars.put("continueLoop", "false")  // Stop the loop
+    log.info("No more data. Setting continueLoop to false.")
 } else {
     vars.put("continueLoop", "true")   // Continue the loop
+    log.info("Data found. Setting continueLoop to true.")
 
     // Create the CSV file if it doesn't exist
     if (!Files.exists(Paths.get(csvFilePath))) {
@@ -33,10 +35,14 @@ if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
 
     // Iterate over each row of data and write it to the CSV
     jsonResponse1.each { row ->
-        // Convert the row map values to a comma-separated string
-        def csvRow = row.values().join(",") + "\n"
-        
-        // Append the row to the CSV file
-        Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
+        if (row instanceof Map) {  // Ensure the row is a Map object
+            // Convert the row map values to a comma-separated string
+            def csvRow = row.values().join(",") + "\n"
+            
+            // Append the row to the CSV file
+            Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
+        } else {
+            log.warn("Row is not a Map: ${row}")
+        }
     }
 }
