@@ -39,12 +39,17 @@ if (!Files.exists(Paths.get(csvFilePath))) {
 // Iterate over each row of data and write it to the CSV
 if (jsonResponse1 != null && !jsonResponse1.isEmpty()) {
     jsonResponse1.each { row ->
-        if (row instanceof Map) {  // Ensure the row is a Map object
+        // Convert LinkedHashMap$Entry to a Map if necessary
+        if (row instanceof Map.Entry) {
+            row = [(row.key): row.value]
+        }
+
+        if (row instanceof Map) {  // Ensure the row is now a Map object
             def csvRow = row.values().collect { it == null ? "" : it.toString().trim() }.join(",") + "\n"
             Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
             log.info("Row written to CSV: ${csvRow.trim()}")
         } else {
-            log.warn("Skipping non-Map row: ${row.getClass().name} - ${row}")
+            log.warn("Skipping unexpected row type: ${row.getClass().name} - ${row}")
         }
     }
 } else {
