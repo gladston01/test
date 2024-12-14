@@ -136,7 +136,9 @@ def detect_spikes_and_log(df, historic_sla, moving_sla_files, hard_sla=1000, sen
             domain = duration_df.iloc[-1]["domain"]
             leg = duration_df.iloc[-1]["leg"]
             timestamp = duration_df.iloc[-1]["timestamp"]
-            alert_key = f"{domain}_{duration_type}"
+
+            # Use a tuple (domain, metric) as the key
+            alert_key = (domain, duration_type)
 
             # Hard SLA Check
             if max_value > hard_sla:
@@ -185,8 +187,7 @@ def detect_spikes_and_log(df, historic_sla, moving_sla_files, hard_sla=1000, sen
             )
 
     # Write Alerts to Files by Domain and Metric
-    for alert_key, alerts in domain_alerts.items():
-        domain, metric = alert_key.split("_")
+    for (domain, metric), alerts in domain_alerts.items():
         alert_file = os.path.join(REPORTS_FOLDER, f"Alerts_{domain}_{metric}.txt")
         with open(alert_file, "w") as f:
             if alerts:
