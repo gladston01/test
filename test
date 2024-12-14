@@ -94,6 +94,53 @@ def save_historic_sla(historic_sla):
         json.dump(historic_sla, file, indent=4, default=convert_numpy)
 
 
+def detect_spikes(duration_df, threshold):
+    """
+    Detects distinct spikes in the data.
+
+    Args:
+        duration_df (pd.DataFrame): DataFrame with timestamps and values.
+        threshold (float): The threshold for identifying spikes.
+
+    Returns:
+        List[Tuple]: A list of spikes with their start time, end time, and max value.
+    """
+    spikes = []
+    current_spike = {"start_time": None, "end_time": None, "max_value": None}
+
+    for idx, row in duration_df.iterrows():
+        value = row["value"]
+        timestamp = row["timestamp"]
+
+        # Check if the value exceeds the threshold
+        if value > threshold:
+            if current_spike["start_time"] is None:
+                # Start a new spike
+                current_spike["start_time"] = timestamp
+                current_spike["max_value"] = value
+            else:
+                # Update the current spike
+                current_spike["max_value"] = max(current_spike["max_value"], value)
+            # Always update the end time of the spike
+            current_spike["end_time"] = timestamp
+        else:
+            # If we encounter a normal value, finalize the current spike
+            if current_spike["start_time"] is not None:
+                spikes.append(
+                    (current_spike["start_time"], current_spike["end_time"], current_spike["max_value"])
+                )
+                # Reset the current spike
+                current_spike = {"start_time": None, "end_time": None, "max_value": None}
+
+    # Finalize the last spike if still active
+    if current_spike["start_time"] is not None:
+        spikes.append(
+            (current_spike["start_time"], current_spike["end_time"], current_spike["max_value"])
+        )
+
+    return spikes
+
+
 def detect_spikes_and_log(df, historic_sla, moving_sla_files, hard_sla=1000, sensitivity_factor=2, num_runs=5):
     """
     Detects spikes where duration values exceed hard SLA, moving average, or standard deviation thresholds.
@@ -155,26 +202,20 @@ def detect_spikes_and_log(df, historic_sla, moving_sla_files, hard_sla=1000, sen
                 )
 
             # Sudden Spike Detection
-            previous_value = None
-            sudden_spike_start = None
-            sudden_spike_end = None
-            for idx, row in duration_df.iterrows():
-                if previous_value is not None and abs(row["value"] - previous_value) > 400:
-                    if sudden_spike_start is None:
-                        sudden_spike_start = row["timestamp"]
-                    sudden_spike_end = row["timestamp"]
-                previous_value = row["value"]
+            spike_threshold = max(moving_avg + 400, hard_sla)
+            spikes = detect_spikes(duration_df, spike_threshold)
 
-            if sudden_spike_start:
+            for spike in spikes:
+                start_time, end_time, spike_max = spike
                 if alert_key not in domain_alerts:
                     domain_alerts[alert_key] = []
-                if sudden_spike_start == sudden_spike_end:
+                if start_time == end_time:
                     domain_alerts[alert_key].append(
-                        f"Sudden Spike detected for {service} in {domain} {leg} {duration_type} at {sudden_spike_start}, reaching {max_value}ms"
+                        f"Sudden Spike detected for {service} in {domain} {leg} {duration_type} at {start_time}, reaching {spike_max}ms"
                     )
                 else:
                     domain_alerts[alert_key].append(
-                        f"Spike detected for {service} in {domain} {leg} {duration_type} between {sudden_spike_start} and {sudden_spike_end}, reaching {max_value}ms"
+                        f"Spike detected for {service} in {domain} {leg} {duration_type} between {start_time} and {end_time}, reaching {spike_max}ms"
                     )
 
             # Update Historic SLA
