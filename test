@@ -13,27 +13,28 @@ def response = prev.getResponseDataAsString()
 def jsonSlurper = new JsonSlurper()
 def jsonResponse = jsonSlurper.parseText(response)
 
-// Extract the "data" object
+// Extract the "data" array (if your JSON structure uses an array of objects)
 def jsonResponse1 = jsonResponse.data
 
-// Check if "data" is empty and set the continueLoop variable
-if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
-    vars.put("continueLoop", "false")  // Stop the loop
+// If the response contains rows of data
+if (jsonResponse1 != null && jsonResponse1.size() > 0) {
+    // Create the CSV file if it doesn't exist
+    if (!Files.exists(Paths.get(csvFilePath))) {
+        Files.createFile(Paths.get(csvFilePath))
+        
+        // Write the header row to the CSV
+        def header = jsonResponse1[0].keySet().join(",") + "\n"
+        Files.write(Paths.get(csvFilePath), header.getBytes(), StandardOpenOption.APPEND)
+    }
+
+    // Iterate over each row of data and write it to the CSV
+    jsonResponse1.each { row ->
+        // Convert the row map values to a comma-separated string
+        def csvRow = row.values().join(",") + "\n"
+        
+        // Append the row to the CSV file
+        Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
+    }
 } else {
-    vars.put("continueLoop", "true")  // Continue the loop
-}
-
-// Create the CSV file if it doesn't exist, and add a header
-if (!Files.exists(Paths.get(csvFilePath))) {
-    Files.createFile(Paths.get(csvFilePath))
-    Files.write(Paths.get(csvFilePath), "Key,Value\n".getBytes(), StandardOpenOption.APPEND)
-}
-
-// Iterate over the JSON "data" object and write each key-value pair to the CSV file
-jsonResponse1.each { key, value ->
-    // Format the key-value pair as a CSV row
-    def csvRow = "${key},${value}\n"
-
-    // Append the row to the CSV file
-    Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
+    log.info("No data found in response!")
 }
