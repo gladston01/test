@@ -1,7 +1,12 @@
 import psycopg2
 import pandas as pd
+import json
 from datetime import datetime
 import argparse
+import os
+
+
+HISTORIC_SLA_FILE = "historic_sla.json"
 
 
 def parse_time(input_time):
@@ -85,13 +90,69 @@ def query_pgsql(start_time, end_time, db_config):
     return df
 
 
-def detect_spikes_and_log(df, output_file):
+def load_historic_sla():
     """
-    Detects spikes where duration values are consistently over 1000ms and logs them to a TXT file.
+    Loads historic SLA values from a JSON file.
+
+    Returns:
+        dict: Historic SLA values for services and duration types.
+    """
+    if os.path.exists(HISTORIC_SLA_FILE):
+        with open(HISTORIC_SLA_FILE, "r") as file:
+            return json.load(file)
+    return {}
+
+
+def save_historic_sla(historic_sla):
+    """
+    Saves historic SLA values to a JSON file.
+
+    Parameters:
+        historic_sla (dict): Historic SLA values to save.
+    """
+    with open(HISTORIC_SLA_FILE, "w") as file:
+        json.dump(historic_sla, file, indent=4)
+
+
+def update_historic_sla(historic_sla, df):
+    """
+    Updates historic SLA values based on new data.
+
+    Parameters:
+        historic_sla (dict): The current historic SLA values.
+        df (pd.DataFrame): The new data to update the SLA values with.
+
+    Returns:
+        dict: Updated historic SLA values.
+    """
+    for service in df["service"].unique():
+        service_df = df[df["service"] == service]
+
+        for duration_type in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]:
+            max_value = service_df[duration_type].max()
+            if service not in historic_sla:
+                historic_sla[service] = {}
+            if duration_type not in historic_sla[service]:
+                # Initialize historic SLA with the first observed max value
+                historic_sla[service][duration_type] = max_value
+            else:
+                # Update SLA using a rolling average (weighted)
+                historic_sla[service][duration_type] = (
+                    historic_sla[service][duration_type] * 0.9 + max_value * 0.1
+                )
+
+    return historic_sla
+
+
+def detect_spikes_and_log(df, historic_sla, output_file, hard_sla=1000):
+    """
+    Detects spikes where duration values exceed hard or historic SLAs and logs them to a TXT file.
 
     Parameters:
         df (pd.DataFrame): The DataFrame containing the query results.
+        historic_sla (dict): The historic SLA values.
         output_file (str): The path to the output TXT file.
+        hard_sla (int): The hard SLA threshold.
     """
     # Melt the dataframe to bring durations into a single column
     melted_df = df.melt(
@@ -101,41 +162,24 @@ def detect_spikes_and_log(df, output_file):
         value_name="value"
     )
 
-    # Filter rows where value > 1000ms
-    filtered_df = melted_df[melted_df["value"] > 1000]
-
-    # Detect spikes
+    # Detect SLA breaches
     spike_report = []
-    for service in filtered_df["service"].unique():
-        service_df = filtered_df[filtered_df["service"] == service].sort_values(by="timestamp")
-        duration_type_groups = service_df.groupby("duration_type")
+    for service in melted_df["service"].unique():
+        service_df = melted_df[melted_df["service"] == service]
+        for duration_type in ["messagedurations", "requestdurations", "responsedurations", "serverdurations"]:
+            duration_df = service_df[service_df["duration_type"] == duration_type]
 
-        for duration_type, group in duration_type_groups:
-            start_time = None
-            end_time = None
-            spike_active = False
-            max_value = 0
-            count_over_1000 = 0
+            if service in historic_sla and duration_type in historic_sla[service]:
+                historic_sla_value = historic_sla[service][duration_type]
+            else:
+                historic_sla_value = hard_sla  # Fallback to hard SLA if no historic SLA exists
 
-            for _, row in group.iterrows():
-                if not spike_active:
-                    # Start of a new spike
-                    start_time = row["timestamp"]
-                    spike_active = True
-
-                # Update the end time
-                end_time = row["timestamp"]
-
-                # Track the max value and count of values > 1000
-                max_value = max(max_value, row["value"])
-                count_over_1000 += 1
-
-            if spike_active:
-                spike_report.append(
-                    f"Service: {service}, Metric: {duration_type}, "
-                    f"Spike from {start_time} to {end_time}, "
-                    f"Max Value: {max_value}, Responses > 1000ms: {count_over_1000}"
-                )
+            for _, row in duration_df.iterrows():
+                if row["value"] > hard_sla or row["value"] > historic_sla_value:
+                    spike_report.append(
+                        f"Service: {service}, Metric: {duration_type}, Timestamp: {row['timestamp']}, "
+                        f"Value: {row['value']}, Historic SLA: {historic_sla_value}, Hard SLA: {hard_sla}"
+                    )
 
     # Write to TXT file
     with open(output_file, "w") as f:
@@ -144,13 +188,13 @@ def detect_spikes_and_log(df, output_file):
             f.write("\n".join(spike_report))
             print(f"Spikes logged to {output_file}")
         else:
-            f.write("No spikes detected.\n")
-            print("No spikes detected.")
+            f.write("No SLA breaches detected.\n")
+            print("No SLA breaches detected.")
 
 
 if __name__ == "__main__":
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Query PostgreSQL and detect spikes in duration metrics.")
+    parser = argparse.ArgumentParser(description="Query PostgreSQL and detect SLA breaches in duration metrics.")
     parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS' format.")
     parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS' format.")
     args = parser.parse_args()
@@ -176,11 +220,20 @@ if __name__ == "__main__":
     result_df = query_pgsql(start_time, end_time, db_config)
 
     if result_df is not None and not result_df.empty:
+        # Load historic SLA
+        historic_sla = load_historic_sla()
+
+        # Update historic SLA
+        historic_sla = update_historic_sla(historic_sla, result_df)
+
+        # Save updated historic SLA
+        save_historic_sla(historic_sla)
+
         # Output file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = f"alerts_{timestamp}.txt"
 
-        # Detect spikes and log to TXT
-        detect_spikes_and_log(result_df, output_file)
+        # Detect SLA breaches and log
+        detect_spikes_and_log(result_df, historic_sla, output_file)
     else:
         print("No data found for the given time range.")
