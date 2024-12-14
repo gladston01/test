@@ -1,44 +1,39 @@
-def maxMessageLength = 3900
+import groovy.json.JsonSlurper
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
 
-if (alertsSection?.length() > maxMessageLength) {
-    def chunks = []
-    def currentChunk = new StringBuilder()
+// Define the CSV file path
+def csvFilePath = '/path/to/your/output.csv'
 
-    alertsSection.split("\n").each { line ->
-        // Check if adding the next line would exceed the max length
-        if (currentChunk.length() + line.length() + 1 > maxMessageLength) {
-            // Save the current chunk and start a new one
-            chunks.add(currentChunk.toString())
-            currentChunk = new StringBuilder()
-        }
-        // Add the line to the current chunk
-        currentChunk.append(line).append("\n")
-    }
+// Read the response from the previous sampler
+def response = prev.getResponseDataAsString()
 
-    // Add the final chunk if there's remaining content
-    if (currentChunk.length() > 0) {
-        chunks.add(currentChunk.toString())
-    }
+// Parse the JSON response
+def jsonSlurper = new JsonSlurper()
+def jsonResponse = jsonSlurper.parseText(response)
 
-    // Send each chunk as a separate Slack message
-    chunks.eachWithIndex { chunk, index ->
-        def slackMessage = """
-            *Test Alert Notification (Part ${index + 1}/${chunks.size()}):* :rotating_light:
-            *Test Start Time:* ${startTime}
-            *Test End Time:* ${endTime}
-            *Alerts Detected:*
-            ${chunk.trim()}
-        """
-        slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: slackMessage)
-    }
+// Extract the "data" object
+def jsonResponse1 = jsonResponse.data
+
+// Check if "data" is empty and set the continueLoop variable
+if (jsonResponse1 == null || jsonResponse1.isEmpty()) {
+    vars.put("continueLoop", "false")  // Stop the loop
 } else {
-    // Send a single message if it's under the limit
-    def slackMessage = """
-        *Test Alert Notification*: :rotating_light:
-        *Test Start Time:* ${startTime}
-        *Test End Time:* ${endTime}
-        *Alerts Detected:*
-        ${alertsSection}
-    """
-    slackSend(channel: env.SLACK_CHANNEL, color: 'danger', message: slackMessage)
+    vars.put("continueLoop", "true")  // Continue the loop
+}
+
+// Create the CSV file if it doesn't exist, and add a header
+if (!Files.exists(Paths.get(csvFilePath))) {
+    Files.createFile(Paths.get(csvFilePath))
+    Files.write(Paths.get(csvFilePath), "Key,Value\n".getBytes(), StandardOpenOption.APPEND)
+}
+
+// Iterate over the JSON "data" object and write each key-value pair to the CSV file
+jsonResponse1.each { key, value ->
+    // Format the key-value pair as a CSV row
+    def csvRow = "${key},${value}\n"
+
+    // Append the row to the CSV file
+    Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
 }
