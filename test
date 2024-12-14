@@ -16,50 +16,47 @@ def jsonResponse = jsonSlurper.parseText(response)
 // Extract the "data" array
 def jsonResponse1 = jsonResponse.data
 
-// Initialize a counter variable (or get the current value)
-def loopCounter = vars.get("loopCounter") as Integer ?: 0
-def maxLoops = 5000  // Set your desired maximum number of loops
-
-// Helper function to check if all fields in a row are empty
-def isRowEmpty(row) {
-    return row instanceof Map && row.values().every { value ->
-        value == null || value.toString().trim().isEmpty()
-    }
-}
-
-// Check if all rows in the "data" array are empty
-def allRowsEmpty = jsonResponse1 != null && jsonResponse1.every { row ->
-    isRowEmpty(row)
-}
-
 // Increment the loop counter
+def loopCounter = vars.get("loopCounter") as Integer ?: 0
 loopCounter += 1
 vars.put("loopCounter", loopCounter.toString())
 
-// Control the loop based on whether all rows are empty or the counter exceeds the limit
-if (loopCounter > maxLoops || jsonResponse1 == null || jsonResponse1.isEmpty() || allRowsEmpty) {
-    vars.put("continueLoop", "false")  // Stop the loop
-    log.info("Stopping loop: Reached maxLoops (${maxLoops}) or no valid data remaining.")
-} else {
-    vars.put("continueLoop", "true")   // Continue the loop
-    log.info("Valid data found. Continuing loop. Loop Count: ${loopCounter}")
+log.info("Processing loop iteration: ${loopCounter}")
 
-    // Create the CSV file if it doesn't exist
-    if (!Files.exists(Paths.get(csvFilePath))) {
-        Files.createFile(Paths.get(csvFilePath))
-        
-        // Write the header row to the CSV (use keys from the first row of data)
+// Create the CSV file if it doesn't exist
+if (!Files.exists(Paths.get(csvFilePath))) {
+    Files.createFile(Paths.get(csvFilePath))
+    
+    // Write the header row to the CSV (use keys from the first row of data)
+    if (jsonResponse1 != null && !jsonResponse1.isEmpty()) {
         def header = jsonResponse1[0].keySet().join(",") + "\n"
         Files.write(Paths.get(csvFilePath), header.getBytes(), StandardOpenOption.APPEND)
+    } else {
+        log.warn("No data in the response to determine header.")
     }
+}
 
-    // Iterate over each row of data and write it to the CSV
+// Iterate over each row of data and write it to the CSV
+if (jsonResponse1 != null && !jsonResponse1.isEmpty()) {
     jsonResponse1.each { row ->
-        if (row instanceof Map && !isRowEmpty(row)) {  // Skip empty rows
+        if (row instanceof Map) {  // Ensure the row is a Map object
             def csvRow = row.values().collect { it == null ? "" : it.toString().trim() }.join(",") + "\n"
             Files.write(Paths.get(csvFilePath), csvRow.getBytes(), StandardOpenOption.APPEND)
+            log.info("Row written to CSV: ${csvRow.trim()}")
         } else {
-            log.info("Skipping empty row: ${row}")
+            log.warn("Skipping non-Map row: ${row}")
         }
     }
+} else {
+    log.warn("No data rows available in the response.")
+}
+
+// Set the loop control variable to stop after 5000 iterations
+def maxLoops = 5000
+if (loopCounter >= maxLoops) {
+    vars.put("continueLoop", "false")
+    log.info("Stopping loop: Reached max loop count (${maxLoops}).")
+} else {
+    vars.put("continueLoop", "true")
+    log.info("Continuing loop: Current iteration (${loopCounter}).")
 }
