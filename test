@@ -99,26 +99,39 @@ def detect_spikes(df):
 # Step 4: Correlate Anomalies
 def correlate_anomalies(df):
     anomalies = []
+
     for _, row in df.iterrows():
         causes = []
-        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD: causes.append("High Response Time")
-        if row['serverdurations'] >= 0.8 * row['messagedurations']: causes.append("Backend Issue")
-        if row['requestmessagecount'] > TPS_THRESHOLD: causes.append("High TPS")
-        if row['cpu'] > CPU_THRESHOLD: causes.append("High CPU")
-        if row['memory'] > MEMORY_THRESHOLD: causes.append("High Memory")
-        if row['worklist'] > WORKLIST_THRESHOLD: causes.append("High Worklist")
-        if row['load'] > LOAD_THRESHOLD: causes.append("High Load")
-        
+
+        # Check only when messagedurations exceeds the threshold
+        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD:
+            causes.append("High Response Time")
+            if row['serverdurations'] >= 0.8 * row['messagedurations']:
+                causes.append("Backend Issue")
+
+        if row['requestmessagecount'] > TPS_THRESHOLD:
+            causes.append("High TPS")
+        if row['cpu'] > CPU_THRESHOLD:
+            causes.append("High CPU")
+        if row['memory'] > MEMORY_THRESHOLD:
+            causes.append("High Memory")
+        if row['worklist'] > WORKLIST_THRESHOLD:
+            causes.append("High Worklist")
+        if row['load'] > LOAD_THRESHOLD:
+            causes.append("High Load")
+
+        # If any causes are identified, add this row as an anomaly
         if causes:
             anomalies.append({
                 "timestamp": row['timestamp'],
-                "dpbox": row['dpbox'],
-                "domain": row['domain'],
-                "leg": row['leg'],
+                "dpbox": row.get('dpbox', 'N/A'),
+                "domain": row.get('domain', 'N/A'),
+                "leg": row.get('leg', 'N/A'),
                 "service": row.get('service', 'N/A'),
                 "causes": ", ".join(causes),
                 "metrics": row.to_dict(),
             })
+
     return anomalies
 
 # Step 5: Convert Timestamps and Write to Text Files
