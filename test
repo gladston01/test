@@ -1,13 +1,11 @@
 import psycopg2
 import pandas as pd
-import json
 import os
 from datetime import datetime
 import argparse
 
+# Configuration
 REPORTS_FOLDER = "reports"
-HISTORIC_SLA_FILE = "historic_sla.json"
-
 ANOMALY_THRESHOLDS = {
     "MESSAGE_SPIKE_THRESHOLD": 200,
     "TPS_THRESHOLD": 300,
@@ -17,6 +15,8 @@ ANOMALY_THRESHOLDS = {
     "LOAD_THRESHOLD": 80,
 }
 
+EXCLUDE_SERVICES_FOR_TPS = ["ALL"]  # Exclude specific services from TPS checks
+
 
 def parse_time(input_time):
     """
@@ -25,7 +25,6 @@ def parse_time(input_time):
     try:
         return datetime.strptime(input_time, "%Y-%m-%d %H:%M:%S")
     except ValueError:
-        print(f"Invalid time format: {input_time}")
         raise ValueError("Please provide a valid time in 'YYYY-MM-DD HH:MM:SS' format.")
 
 
@@ -52,14 +51,7 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
     }
 
     try:
-        conn = psycopg2.connect(
-            host=db_config['host'],
-            dbname=db_config['dbname'],
-            user=db_config['user'],
-            password=db_config['password'],
-            port=db_config['port']
-        )
-        
+        conn = psycopg2.connect(**db_config)
         dataframes = {}
         for key, query in queries.items():
             with conn.cursor() as cursor:
@@ -67,14 +59,13 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
                 columns = [desc[0] for desc in cursor.description]
                 results = cursor.fetchall()
                 dataframes[key] = pd.DataFrame(results, columns=columns)
-                
     except Exception as e:
         print(f"Error querying the database: {e}")
         return None
     finally:
         if conn:
             conn.close()
-    
+
     return dataframes
 
 
@@ -98,34 +89,51 @@ def detect_anomalies(durations_df, counts_df, metrics_df):
     metrics_df.rename(columns=str.lower, inplace=True)
 
     # High Response Time and Backend Issue Detection
-    for idx, row in durations_df.iterrows():
+    for _, row in durations_df.iterrows():
         service, domain, leg, timestamp = row["service"], row["domain"], row["leg"], row["timestamp"]
-        
+
         # High Response Time
         if row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
-            anomalies["high_response_time"].append(f"{service} in {domain} {leg} exceeded response time at {timestamp}")
-        
+            anomalies["high_response_time"].append(
+                f"At {timestamp}, {service} in {domain} {leg} had a high response time of {row['messagedurations']} ms."
+            )
+
         # Backend Issue
         if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
-            anomalies["backend_issue"].append(f"{service} in {domain} {leg} backend issue at {timestamp}")
+            anomalies["backend_issue"].append(
+                f"At {timestamp}, {service} in {domain} {leg}: Possible backend issue. "
+                f"Message Duration: {row['messagedurations']} ms, Server Duration: {row['serverdurations']} ms."
+            )
 
     # High TPS Detection
-    for idx, row in counts_df.iterrows():
-        if row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
-            anomalies["high_tps"].append(f"{row['service']} in {row['domain']} {row['leg']} exceeded TPS at {row['timestamp']}")
+    for _, row in counts_df.iterrows():
+        if row["service"] not in EXCLUDE_SERVICES_FOR_TPS and row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
+            anomalies["high_tps"].append(
+                f"At {row['timestamp']}, {row['service']} in {row['domain']} {row['leg']} exceeded TPS threshold "
+                f"with {row['requestmessagecount']} requests."
+            )
 
     # High System Metrics Detection
-    for idx, row in metrics_df.iterrows():
+    for _, row in metrics_df.iterrows():
         domain, leg, timestamp = row["domain"], row["leg"], row["timestamp"]
+
         if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
-            anomalies["high_cpu"].append(f"High CPU usage in {domain} {leg} at {timestamp}")
+            anomalies["high_cpu"].append(
+                f"At {timestamp}, high CPU usage detected in {domain} {leg}, reaching {row['cpu']}%."
+            )
         if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
-            anomalies["high_memory"].append(f"High memory usage in {domain} {leg} at {timestamp}")
+            anomalies["high_memory"].append(
+                f"At {timestamp}, high memory usage detected in {domain} {leg}, reaching {row['memory']}%."
+            )
         if row["worklist"] > ANOMALY_THRESHOLDS["WORKLIST_THRESHOLD"]:
-            anomalies["high_worklist"].append(f"High worklist queue in {domain} {leg} at {timestamp}")
+            anomalies["high_worklist"].append(
+                f"At {timestamp}, high worklist queue in {domain} {leg} with {row['worklist']} tasks."
+            )
         if row["load"] > ANOMALY_THRESHOLDS["LOAD_THRESHOLD"]:
-            anomalies["high_load"].append(f"High system load in {domain} {leg} at {timestamp}")
-    
+            anomalies["high_load"].append(
+                f"At {timestamp}, high system load in {domain} {leg}, reaching {row['load']}."
+            )
+
     return anomalies
 
 
@@ -167,7 +175,7 @@ if __name__ == "__main__":
 
     # Fetch data
     dataframes = query_pgsql_with_multiple_metrics(start_time, end_time, db_config)
-    
+
     if dataframes:
         anomalies = detect_anomalies(dataframes["durations"], dataframes["counts"], dataframes["metrics"])
         log_anomalies(anomalies)
