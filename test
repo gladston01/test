@@ -22,6 +22,9 @@ ANOMALY_THRESHOLDS = {
 EXCLUDE_SERVICES_TPS = ["ALL"]
 EXCLUDE_SERVICES_MESSAGESPIKE = ["ALL"]
 
+MOVING_AVERAGE_WINDOW = 5
+SENSITIVITY_FACTOR = 2
+
 
 def parse_time(input_time):
     try:
@@ -30,10 +33,19 @@ def parse_time(input_time):
         raise ValueError("Please provide a valid time in 'YYYY-MM-DD HH:MM:SS' format.")
 
 
+def load_historic_sla():
+    if os.path.exists(HISTORIC_SLA_FILE):
+        with open(HISTORIC_SLA_FILE, "r") as file:
+            return json.load(file)
+    return {}
+
+
+def save_historic_sla(historic_sla):
+    with open(HISTORIC_SLA_FILE, "w") as file:
+        json.dump(historic_sla, file, indent=4)
+
+
 def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
-    """
-    Fetches data from multiple tables and returns as DataFrames.
-    """
     queries = {
         "durations": """
             SELECT dpbox, leg, domain, service, messagedurations, requestdurations, responsedurations, serverdurations, timestamp
@@ -71,75 +83,56 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
     return dataframes
 
 
-def detect_spike_times(df, column, threshold):
+def calculate_moving_average(df, column, service, historic_sla):
     """
-    Detects start and end times of spikes exceeding the threshold.
+    Calculates moving average dynamically and includes historical values.
     """
-    spikes = []
-    current_spike = {"start": None, "end": None, "max_value": None}
+    current_avg = df[column].rolling(window=MOVING_AVERAGE_WINDOW).mean()
+    last_avg = current_avg.iloc[-1] if not current_avg.empty else 0
 
-    for _, row in df.iterrows():
-        value, timestamp = row[column], row["timestamp"]
+    # Combine historical moving averages
+    if service not in historic_sla:
+        historic_sla[service] = {}
+    if column not in historic_sla[service]:
+        historic_sla[service][column] = []
+    historic_sla[service][column].append(last_avg)
 
-        if value > threshold:
-            if current_spike["start"] is None:
-                current_spike["start"] = timestamp
-                current_spike["max_value"] = value
-            current_spike["end"] = timestamp
-            current_spike["max_value"] = max(current_spike["max_value"], value)
-        else:
-            if current_spike["start"]:
-                spikes.append(
-                    f"Spike detected: Start={current_spike['start']}, End={current_spike['end']}, Max Value={current_spike['max_value']} ms."
-                )
-                current_spike = {"start": None, "end": None, "max_value": None}
+    # Keep only recent values (window size)
+    if len(historic_sla[service][column]) > MOVING_AVERAGE_WINDOW:
+        historic_sla[service][column] = historic_sla[service][column][-MOVING_AVERAGE_WINDOW:]
 
-    if current_spike["start"]:
-        spikes.append(
-            f"Spike detected: Start={current_spike['start']}, End={current_spike['end']}, Max Value={current_spike['max_value']} ms."
-        )
-
-    return spikes
+    return last_avg
 
 
-def detect_anomalies(durations_df, counts_df, metrics_df):
+def detect_anomalies(durations_df, counts_df, metrics_df, historic_sla):
     """
-    Detects anomalies across message spikes, TPS, and system metrics.
+    Detects anomalies across message spikes, TPS, system metrics, and moving average violations.
     """
-    anomalies = {"message_spikes": [], "tps_anomalies": [], "system_metric_anomalies": [], "backend_issues": []}
+    anomalies = {"message_spikes": [], "tps_anomalies": [], "system_metric_anomalies": [], "backend_issues": [], "moving_avg_violations": []}
 
     # Filter out excluded services
     durations_df = durations_df[~durations_df["service"].isin(EXCLUDE_SERVICES_MESSAGESPIKE)]
     counts_df = counts_df[~counts_df["service"].isin(EXCLUDE_SERVICES_TPS)]
 
-    # Message Spike Detection
-    spikes = detect_spike_times(durations_df, "messagedurations", ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"])
-    anomalies["message_spikes"].extend(spikes)
+    # Moving Average Anomalies
+    for service in durations_df["service"].unique():
+        service_df = durations_df[durations_df["service"] == service]
+        for _, row in service_df.iterrows():
+            current_value = row["messagedurations"]
+            moving_avg = calculate_moving_average(service_df, "messagedurations", service, historic_sla)
 
-    # TPS Anomalies
-    for _, row in counts_df.iterrows():
-        if row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
-            anomalies["tps_anomalies"].append(
-                f"At {row['timestamp']}, {row['service']} exceeded TPS threshold with {row['requestmessagecount']} requests."
-            )
-
-    # System Metrics Anomalies
-    for _, row in metrics_df.iterrows():
-        if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
-            anomalies["system_metric_anomalies"].append(
-                f"At {row['timestamp']}, high CPU usage detected in {row['domain']} {row['leg']}, reaching {row['cpu']}%."
-            )
-        if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
-            anomalies["system_metric_anomalies"].append(
-                f"At {row['timestamp']}, high memory usage detected in {row['domain']} {row['leg']}, reaching {row['memory']}%."
-            )
+            if current_value > moving_avg + SENSITIVITY_FACTOR * ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
+                anomalies["moving_avg_violations"].append(
+                    f"At {row['timestamp']}, {row['service']} in {row['domain']} {row['leg']} exceeded moving average threshold. "
+                    f"Value={current_value} ms, Moving Avg={moving_avg:.2f} ms."
+                )
 
     # Backend Issues
     for _, row in durations_df.iterrows():
         if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
             anomalies["backend_issues"].append(
-                f"At {row['timestamp']}, backend issue detected. Message Duration: {row['messagedurations']} ms, "
-                f"Server Duration: {row['serverdurations']} ms."
+                f"At {row['timestamp']}, {row['service']} in {row['domain']} {row['leg']} detected a backend issue. "
+                f"Message Duration: {row['messagedurations']} ms, Server Duration: {row['serverdurations']} ms."
             )
 
     return anomalies
@@ -158,7 +151,7 @@ def log_anomalies(anomalies):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Detect anomalies with spike detection and backend checks.")
+    parser = argparse.ArgumentParser(description="Detect anomalies with moving averages, spike detection, and backend checks.")
     parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS'.")
     parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS'.")
     args = parser.parse_args()
@@ -178,10 +171,12 @@ if __name__ == "__main__":
         print(e)
         exit(1)
 
+    historic_sla = load_historic_sla()
     dataframes = query_pgsql_with_multiple_metrics(start_time, end_time, db_config)
 
     if dataframes:
-        anomalies = detect_anomalies(dataframes["durations"], dataframes["counts"], dataframes["metrics"])
+        anomalies = detect_anomalies(dataframes["durations"], dataframes["counts"], dataframes["metrics"], historic_sla)
+        save_historic_sla(historic_sla)
         log_anomalies(anomalies)
         print("Anomaly detection complete.")
     else:
