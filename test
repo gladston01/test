@@ -19,6 +19,9 @@ ANOMALY_THRESHOLDS = {
 
 
 def parse_time(input_time):
+    """
+    Parses input time string to datetime object.
+    """
     try:
         return datetime.strptime(input_time, "%Y-%m-%d %H:%M:%S")
     except ValueError:
@@ -37,7 +40,7 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
             WHERE timestamp BETWEEN %s AND %s
         """,
         "counts": """
-            SELECT dpbox, leg, domain, service, errormessagecount, requestmessagecount, rresponsemessagecount, timestamp
+            SELECT dpbox, leg, domain, service, errormessagecount, requestmessagecount, rresponsemessagecount AS responsemessagecount, timestamp
             FROM dpmessagecounts
             WHERE timestamp BETWEEN %s AND %s
         """,
@@ -89,6 +92,12 @@ def detect_anomalies(durations_df, counts_df, metrics_df):
         "high_load": [],
     }
 
+    # Standardize column names
+    durations_df.rename(columns=str.lower, inplace=True)
+    counts_df.rename(columns=str.lower, inplace=True)
+    metrics_df.rename(columns=str.lower, inplace=True)
+
+    # High Response Time and Backend Issue Detection
     for idx, row in durations_df.iterrows():
         service, domain, leg, timestamp = row["service"], row["domain"], row["leg"], row["timestamp"]
         
@@ -99,20 +108,23 @@ def detect_anomalies(durations_df, counts_df, metrics_df):
         # Backend Issue
         if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
             anomalies["backend_issue"].append(f"{service} in {domain} {leg} backend issue at {timestamp}")
-    
+
+    # High TPS Detection
     for idx, row in counts_df.iterrows():
         if row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
             anomalies["high_tps"].append(f"{row['service']} in {row['domain']} {row['leg']} exceeded TPS at {row['timestamp']}")
-    
+
+    # High System Metrics Detection
     for idx, row in metrics_df.iterrows():
+        domain, leg, timestamp = row["domain"], row["leg"], row["timestamp"]
         if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
-            anomalies["high_cpu"].append(f"{row['service']} in {row['domain']} {row['leg']} high CPU at {row['timestamp']}")
+            anomalies["high_cpu"].append(f"High CPU usage in {domain} {leg} at {timestamp}")
         if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
-            anomalies["high_memory"].append(f"{row['service']} in {row['domain']} {row['leg']} high memory at {row['timestamp']}")
+            anomalies["high_memory"].append(f"High memory usage in {domain} {leg} at {timestamp}")
         if row["worklist"] > ANOMALY_THRESHOLDS["WORKLIST_THRESHOLD"]:
-            anomalies["high_worklist"].append(f"{row['service']} in {row['domain']} {row['leg']} high worklist at {row['timestamp']}")
+            anomalies["high_worklist"].append(f"High worklist queue in {domain} {leg} at {timestamp}")
         if row["load"] > ANOMALY_THRESHOLDS["LOAD_THRESHOLD"]:
-            anomalies["high_load"].append(f"{row['service']} in {row['domain']} {row['leg']} high load at {row['timestamp']}")
+            anomalies["high_load"].append(f"High system load in {domain} {leg} at {timestamp}")
     
     return anomalies
 
@@ -130,24 +142,6 @@ def log_anomalies(anomalies):
             else:
                 file.write(f"No {anomaly_type.replace('_', ' ')} anomalies detected.\n")
     print(f"Anomalies logged to {REPORTS_FOLDER}")
-
-
-def load_historic_sla():
-    """
-    Loads historic SLA values from a JSON file.
-    """
-    if os.path.exists(HISTORIC_SLA_FILE):
-        with open(HISTORIC_SLA_FILE, "r") as file:
-            return json.load(file)
-    return {}
-
-
-def save_historic_sla(historic_sla):
-    """
-    Saves historic SLA values to a JSON file.
-    """
-    with open(HISTORIC_SLA_FILE, "w") as file:
-        json.dump(historic_sla, file, indent=4)
 
 
 if __name__ == "__main__":
