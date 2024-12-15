@@ -148,10 +148,15 @@ def write_to_txt(file_name, data):
         os.makedirs("reports", exist_ok=True)
         file_path = os.path.join("reports", file_name)
 
-        # Write data to the file in JSON format
+        # Write data to the file in JSON format, converting Timestamp to string
         with open(file_path, "w") as f:
             for entry in data:
-                f.write(json.dumps(entry) + "\n")
+                # Convert all Timestamps in the dictionary to strings
+                serialized_entry = {
+                    key: (value.isoformat() if isinstance(value, pd.Timestamp) else value)
+                    for key, value in entry.items()
+                }
+                f.write(json.dumps(serialized_entry) + "\n")
         print(f"Data successfully written to {file_path}")
     except Exception as e:
         print(f"Error writing data to {file_name}: {e}")
