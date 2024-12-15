@@ -90,19 +90,16 @@ def calculate_moving_average(df, column, service, historic_sla):
     current_avg = df[column].rolling(window=MOVING_AVERAGE_WINDOW).mean()
     last_avg = current_avg.iloc[-1] if not current_avg.empty else 0
 
-    # Ensure the structure for historic_sla is properly initialized
     if service not in historic_sla:
         historic_sla[service] = {}
     if column not in historic_sla[service]:
         historic_sla[service][column] = []  # Initialize as a list
 
-    # Add the new average to the list
     if isinstance(historic_sla[service][column], list):
         historic_sla[service][column].append(last_avg)
     else:
         historic_sla[service][column] = [last_avg]  # Overwrite with a list
 
-    # Keep only the recent values (limit to MOVING_AVERAGE_WINDOW)
     if len(historic_sla[service][column]) > MOVING_AVERAGE_WINDOW:
         historic_sla[service][column] = historic_sla[service][column][-MOVING_AVERAGE_WINDOW:]
 
@@ -113,7 +110,11 @@ def detect_anomalies(durations_df, counts_df, metrics_df, historic_sla):
     """
     Detects anomalies across message spikes, TPS, system metrics, and moving average violations.
     """
-    anomalies = {"moving_avg_violations": [], "backend_issues": []}
+    anomalies = {
+        "moving_avg_violations": [],
+        "backend_issues": [],
+        "system_metric_anomalies": [],
+    }
 
     # Moving Average Anomalies
     for service in durations_df["service"].unique():
@@ -138,6 +139,25 @@ def detect_anomalies(durations_df, counts_df, metrics_df, historic_sla):
             anomalies["backend_issues"].append(
                 f"At {row['timestamp']}, {row['service']} in {row['domain']} {row['leg']} detected a backend issue. "
                 f"Message Duration: {row['messagedurations']} ms, Server Duration: {row['serverdurations']} ms."
+            )
+
+    # System Metric Anomalies
+    for _, row in metrics_df.iterrows():
+        if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high CPU usage in {row['domain']} {row['leg']}, reaching {row['cpu']}%."
+            )
+        if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high memory usage in {row['domain']} {row['leg']}, reaching {row['memory']}%."
+            )
+        if row["worklist"] > ANOMALY_THRESHOLDS["WORKLIST_THRESHOLD"]:
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high worklist queue in {row['domain']} {row['leg']}, reaching {row['worklist']} tasks."
+            )
+        if row["load"] > ANOMALY_THRESHOLDS["LOAD_THRESHOLD"]:
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high system load in {row['domain']} {row['leg']}, reaching {row['load']}."
             )
 
     return anomalies
