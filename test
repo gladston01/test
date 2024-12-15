@@ -97,7 +97,10 @@ def calculate_moving_average(df, column, service, historic_sla):
         historic_sla[service][column] = []  # Initialize as a list
 
     # Add the new average to the list
-    historic_sla[service][column].append(last_avg)
+    if isinstance(historic_sla[service][column], list):
+        historic_sla[service][column].append(last_avg)
+    else:
+        historic_sla[service][column] = [last_avg]  # Overwrite with a list
 
     # Keep only the recent values (limit to MOVING_AVERAGE_WINDOW)
     if len(historic_sla[service][column]) > MOVING_AVERAGE_WINDOW:
@@ -107,11 +110,18 @@ def calculate_moving_average(df, column, service, historic_sla):
 
 
 def detect_anomalies(durations_df, counts_df, metrics_df, historic_sla):
+    """
+    Detects anomalies across message spikes, TPS, system metrics, and moving average violations.
+    """
     anomalies = {"moving_avg_violations": [], "backend_issues": []}
 
     # Moving Average Anomalies
     for service in durations_df["service"].unique():
         service_df = durations_df[durations_df["service"] == service]
+
+        if service not in historic_sla:
+            historic_sla[service] = {}
+
         for _, row in service_df.iterrows():
             current_value = row["messagedurations"]
             moving_avg = calculate_moving_average(service_df, "messagedurations", service, historic_sla)
