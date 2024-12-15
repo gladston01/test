@@ -1,11 +1,14 @@
 import psycopg2
 import pandas as pd
 import os
+import json
 from datetime import datetime
 import argparse
 
 # Configuration
 REPORTS_FOLDER = "reports"
+HISTORIC_SLA_FILE = "historic_sla.json"
+
 ANOMALY_THRESHOLDS = {
     "MESSAGE_SPIKE_THRESHOLD": 200,
     "TPS_THRESHOLD": 300,
@@ -15,13 +18,12 @@ ANOMALY_THRESHOLDS = {
     "LOAD_THRESHOLD": 80,
 }
 
-EXCLUDE_SERVICES_FOR_TPS = ["ALL"]  # Exclude specific services from TPS checks
+# Exclusion lists for specific checks
+EXCLUDE_SERVICES_TPS = ["ALL"]
+EXCLUDE_SERVICES_MESSAGESPIKE = ["ALL"]
 
 
 def parse_time(input_time):
-    """
-    Parses input time string to datetime object.
-    """
     try:
         return datetime.strptime(input_time, "%Y-%m-%d %H:%M:%S")
     except ValueError:
@@ -49,7 +51,6 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
             WHERE timestamp BETWEEN %s AND %s
         """
     }
-
     try:
         conn = psycopg2.connect(**db_config)
         dataframes = {}
@@ -59,6 +60,7 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
                 columns = [desc[0] for desc in cursor.description]
                 results = cursor.fetchall()
                 dataframes[key] = pd.DataFrame(results, columns=columns)
+                print(f"Fetched {len(results)} rows for {key} data.")
     except Exception as e:
         print(f"Error querying the database: {e}")
         return None
@@ -69,78 +71,81 @@ def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
     return dataframes
 
 
+def detect_spike_times(df, column, threshold):
+    """
+    Detects start and end times of spikes exceeding the threshold.
+    """
+    spikes = []
+    current_spike = {"start": None, "end": None, "max_value": None}
+
+    for _, row in df.iterrows():
+        value, timestamp = row[column], row["timestamp"]
+
+        if value > threshold:
+            if current_spike["start"] is None:
+                current_spike["start"] = timestamp
+                current_spike["max_value"] = value
+            current_spike["end"] = timestamp
+            current_spike["max_value"] = max(current_spike["max_value"], value)
+        else:
+            if current_spike["start"]:
+                spikes.append(
+                    f"Spike detected: Start={current_spike['start']}, End={current_spike['end']}, Max Value={current_spike['max_value']} ms."
+                )
+                current_spike = {"start": None, "end": None, "max_value": None}
+
+    if current_spike["start"]:
+        spikes.append(
+            f"Spike detected: Start={current_spike['start']}, End={current_spike['end']}, Max Value={current_spike['max_value']} ms."
+        )
+
+    return spikes
+
+
 def detect_anomalies(durations_df, counts_df, metrics_df):
     """
-    Detects anomalies across multiple metrics.
+    Detects anomalies across message spikes, TPS, and system metrics.
     """
-    anomalies = {
-        "high_response_time": [],
-        "backend_issue": [],
-        "high_tps": [],
-        "high_cpu": [],
-        "high_memory": [],
-        "high_worklist": [],
-        "high_load": [],
-    }
+    anomalies = {"message_spikes": [], "tps_anomalies": [], "system_metric_anomalies": [], "backend_issues": []}
 
-    # Standardize column names
-    durations_df.rename(columns=str.lower, inplace=True)
-    counts_df.rename(columns=str.lower, inplace=True)
-    metrics_df.rename(columns=str.lower, inplace=True)
+    # Filter out excluded services
+    durations_df = durations_df[~durations_df["service"].isin(EXCLUDE_SERVICES_MESSAGESPIKE)]
+    counts_df = counts_df[~counts_df["service"].isin(EXCLUDE_SERVICES_TPS)]
 
-    # High Response Time and Backend Issue Detection
-    for _, row in durations_df.iterrows():
-        service, domain, leg, timestamp = row["service"], row["domain"], row["leg"], row["timestamp"]
+    # Message Spike Detection
+    spikes = detect_spike_times(durations_df, "messagedurations", ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"])
+    anomalies["message_spikes"].extend(spikes)
 
-        # High Response Time
-        if row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
-            anomalies["high_response_time"].append(
-                f"At {timestamp}, {service} in {domain} {leg} had a high response time of {row['messagedurations']} ms."
-            )
-
-        # Backend Issue
-        if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
-            anomalies["backend_issue"].append(
-                f"At {timestamp}, {service} in {domain} {leg}: Possible backend issue. "
-                f"Message Duration: {row['messagedurations']} ms, Server Duration: {row['serverdurations']} ms."
-            )
-
-    # High TPS Detection
+    # TPS Anomalies
     for _, row in counts_df.iterrows():
-        if row["service"] not in EXCLUDE_SERVICES_FOR_TPS and row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
-            anomalies["high_tps"].append(
-                f"At {row['timestamp']}, {row['service']} in {row['domain']} {row['leg']} exceeded TPS threshold "
-                f"with {row['requestmessagecount']} requests."
+        if row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
+            anomalies["tps_anomalies"].append(
+                f"At {row['timestamp']}, {row['service']} exceeded TPS threshold with {row['requestmessagecount']} requests."
             )
 
-    # High System Metrics Detection
+    # System Metrics Anomalies
     for _, row in metrics_df.iterrows():
-        domain, leg, timestamp = row["domain"], row["leg"], row["timestamp"]
-
         if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
-            anomalies["high_cpu"].append(
-                f"At {timestamp}, high CPU usage detected in {domain} {leg}, reaching {row['cpu']}%."
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high CPU usage detected in {row['domain']} {row['leg']}, reaching {row['cpu']}%."
             )
         if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
-            anomalies["high_memory"].append(
-                f"At {timestamp}, high memory usage detected in {domain} {leg}, reaching {row['memory']}%."
+            anomalies["system_metric_anomalies"].append(
+                f"At {row['timestamp']}, high memory usage detected in {row['domain']} {row['leg']}, reaching {row['memory']}%."
             )
-        if row["worklist"] > ANOMALY_THRESHOLDS["WORKLIST_THRESHOLD"]:
-            anomalies["high_worklist"].append(
-                f"At {timestamp}, high worklist queue in {domain} {leg} with {row['worklist']} tasks."
-            )
-        if row["load"] > ANOMALY_THRESHOLDS["LOAD_THRESHOLD"]:
-            anomalies["high_load"].append(
-                f"At {timestamp}, high system load in {domain} {leg}, reaching {row['load']}."
+
+    # Backend Issues
+    for _, row in durations_df.iterrows():
+        if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
+            anomalies["backend_issues"].append(
+                f"At {row['timestamp']}, backend issue detected. Message Duration: {row['messagedurations']} ms, "
+                f"Server Duration: {row['serverdurations']} ms."
             )
 
     return anomalies
 
 
 def log_anomalies(anomalies):
-    """
-    Logs anomalies into text files.
-    """
     os.makedirs(REPORTS_FOLDER, exist_ok=True)
     for anomaly_type, messages in anomalies.items():
         file_path = os.path.join(REPORTS_FOLDER, f"{anomaly_type}_anomalies.txt")
@@ -153,17 +158,10 @@ def log_anomalies(anomalies):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query PostgreSQL and detect SLA breaches in duration metrics.")
-    parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS' format.")
-    parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS' format.")
+    parser = argparse.ArgumentParser(description="Detect anomalies with spike detection and backend checks.")
+    parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS'.")
+    parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS'.")
     args = parser.parse_args()
-
-    try:
-        start_time = parse_time(args.start_time)
-        end_time = parse_time(args.end_time)
-    except ValueError as e:
-        print(e)
-        exit(1)
 
     db_config = {
         'host': 'localhost',
@@ -173,7 +171,13 @@ if __name__ == "__main__":
         'port': 5432
     }
 
-    # Fetch data
+    try:
+        start_time = parse_time(args.start_time)
+        end_time = parse_time(args.end_time)
+    except ValueError as e:
+        print(e)
+        exit(1)
+
     dataframes = query_pgsql_with_multiple_metrics(start_time, end_time, db_config)
 
     if dataframes:
