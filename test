@@ -39,7 +39,7 @@ def fetch_data(start_time, end_time):
         WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
         """
         metrics_query = f"""
-        SELECT dpbox, leg, domain, service, cpu, worklist, memory, load, timestamp
+        SELECT dpbox, leg, domain, cpu, worklist, memory, load, timestamp
         FROM dpsystemmetrics
         WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
         """
@@ -57,9 +57,21 @@ def fetch_data(start_time, end_time):
 
 # Step 2: Merge Data from Multiple Tables
 def merge_data(durations_df, counts_df, metrics_df):
-    # Merge on common columns: dpbox, leg, domain, service, timestamp
-    merged_df = pd.merge(durations_df, counts_df, on=['dpbox', 'leg', 'domain', 'service', 'timestamp'], how='inner')
-    merged_df = pd.merge(merged_df, metrics_df, on=['dpbox', 'leg', 'domain', 'service', 'timestamp'], how='inner')
+    # Merge durations and counts on all common columns
+    merged_df = pd.merge(
+        durations_df, 
+        counts_df, 
+        on=['dpbox', 'leg', 'domain', 'service', 'timestamp'], 
+        how='inner'
+    )
+
+    # Merge with metrics table (exclude 'service' as it does not exist in the metrics table)
+    merged_df = pd.merge(
+        merged_df, 
+        metrics_df, 
+        on=['dpbox', 'leg', 'domain', 'timestamp'], 
+        how='inner'
+    )
     
     # Handle missing values
     merged_df = merged_df.fillna(0)
@@ -90,7 +102,7 @@ def detect_spikes(df):
                     "dpbox": spike_metrics['dpbox'],
                     "domain": spike_metrics['domain'],
                     "leg": spike_metrics['leg'],
-                    "service": spike_metrics['service'],
+                    "service": spike_metrics.get('service', 'N/A'),
                     "max_metrics": spike_metrics.to_dict(),
                 })
     return spikes
@@ -122,7 +134,7 @@ def correlate_anomalies(df):
                 "dpbox": row['dpbox'],
                 "domain": row['domain'],
                 "leg": row['leg'],
-                "service": row['service'],
+                "service": row.get('service', 'N/A'),
                 "causes": ", ".join(causes),
                 "metrics": row.to_dict()  # Include all metrics
             })
