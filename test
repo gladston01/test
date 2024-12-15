@@ -90,14 +90,16 @@ def calculate_moving_average(df, column, service, historic_sla):
     current_avg = df[column].rolling(window=MOVING_AVERAGE_WINDOW).mean()
     last_avg = current_avg.iloc[-1] if not current_avg.empty else 0
 
-    # Combine historical moving averages
+    # Ensure the structure for historic_sla is properly initialized
     if service not in historic_sla:
         historic_sla[service] = {}
     if column not in historic_sla[service]:
-        historic_sla[service][column] = []
+        historic_sla[service][column] = []  # Initialize as a list
+
+    # Add the new average to the list
     historic_sla[service][column].append(last_avg)
 
-    # Keep only recent values (window size)
+    # Keep only the recent values (limit to MOVING_AVERAGE_WINDOW)
     if len(historic_sla[service][column]) > MOVING_AVERAGE_WINDOW:
         historic_sla[service][column] = historic_sla[service][column][-MOVING_AVERAGE_WINDOW:]
 
@@ -105,14 +107,7 @@ def calculate_moving_average(df, column, service, historic_sla):
 
 
 def detect_anomalies(durations_df, counts_df, metrics_df, historic_sla):
-    """
-    Detects anomalies across message spikes, TPS, system metrics, and moving average violations.
-    """
-    anomalies = {"message_spikes": [], "tps_anomalies": [], "system_metric_anomalies": [], "backend_issues": [], "moving_avg_violations": []}
-
-    # Filter out excluded services
-    durations_df = durations_df[~durations_df["service"].isin(EXCLUDE_SERVICES_MESSAGESPIKE)]
-    counts_df = counts_df[~counts_df["service"].isin(EXCLUDE_SERVICES_TPS)]
+    anomalies = {"moving_avg_violations": [], "backend_issues": []}
 
     # Moving Average Anomalies
     for service in durations_df["service"].unique():
@@ -151,7 +146,7 @@ def log_anomalies(anomalies):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Detect anomalies with moving averages, spike detection, and backend checks.")
+    parser = argparse.ArgumentParser(description="Detect anomalies with moving averages and backend checks.")
     parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS'.")
     parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS'.")
     args = parser.parse_args()
