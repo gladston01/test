@@ -27,7 +27,6 @@ def fetch_data(start_time, end_time):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         
-        # Queries to fetch data
         durations_query = f"""
         SELECT dpbox, leg, domain, service, messagedurations, requestdurations, responsedurations, serverdurations, timestamp
         FROM dpmessagedurations
@@ -44,7 +43,6 @@ def fetch_data(start_time, end_time):
         WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
         """
         
-        # Read data into Pandas DataFrames
         durations_df = pd.read_sql_query(durations_query, conn)
         counts_df = pd.read_sql_query(counts_query, conn)
         metrics_df = pd.read_sql_query(metrics_query, conn)
@@ -55,27 +53,19 @@ def fetch_data(start_time, end_time):
         print(f"Error fetching data: {e}")
         return None, None, None
 
-# Step 2: Merge Data from Multiple Tables
+# Step 2: Merge Data
 def merge_data(durations_df, counts_df, metrics_df):
-    # Merge durations and counts on all common columns
     merged_df = pd.merge(
-        durations_df, 
-        counts_df, 
+        durations_df, counts_df, 
         on=['dpbox', 'leg', 'domain', 'service', 'timestamp'], 
         how='inner'
     )
-
-    # Merge with metrics table (exclude 'service' as it does not exist in the metrics table)
     merged_df = pd.merge(
-        merged_df, 
-        metrics_df, 
+        merged_df, metrics_df, 
         on=['dpbox', 'leg', 'domain', 'timestamp'], 
         how='inner'
     )
-    
-    # Handle missing values
-    merged_df = merged_df.fillna(0)
-    return merged_df
+    return merged_df.fillna(0)
 
 # Step 3: Detect Spikes
 def detect_spikes(df):
@@ -89,16 +79,15 @@ def detect_spikes(df):
             if not spike_active:
                 spike_active = True
                 spike_start = row['timestamp']
-                spike_metrics = row  # Capture initial metrics
+                spike_metrics = row
             else:
                 spike_metrics = row.combine(spike_metrics, max)
         else:
-            if spike_active:  # End the spike
+            if spike_active:
                 spike_active = False
-                spike_end = row['timestamp']
                 spikes.append({
                     "start_time": spike_start,
-                    "end_time": spike_end,
+                    "end_time": row['timestamp'],
                     "dpbox": spike_metrics['dpbox'],
                     "domain": spike_metrics['domain'],
                     "leg": spike_metrics['leg'],
@@ -110,25 +99,17 @@ def detect_spikes(df):
 # Step 4: Correlate Anomalies
 def correlate_anomalies(df):
     anomalies = []
-
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         causes = []
-        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD:
-            causes.append("High Response Time")
-        if row['serverdurations'] >= 0.8 * row['messagedurations']:
-            causes.append("Backend Issue")
-        if row['requestmessagecount'] > TPS_THRESHOLD:
-            causes.append("High TPS")
-        if row['cpu'] > CPU_THRESHOLD:
-            causes.append("High CPU")
-        if row['memory'] > MEMORY_THRESHOLD:
-            causes.append("High Memory")
-        if row['worklist'] > WORKLIST_THRESHOLD:
-            causes.append("High Worklist")
-        if row['load'] > LOAD_THRESHOLD:
-            causes.append("High Load")
+        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD: causes.append("High Response Time")
+        if row['serverdurations'] >= 0.8 * row['messagedurations']: causes.append("Backend Issue")
+        if row['requestmessagecount'] > TPS_THRESHOLD: causes.append("High TPS")
+        if row['cpu'] > CPU_THRESHOLD: causes.append("High CPU")
+        if row['memory'] > MEMORY_THRESHOLD: causes.append("High Memory")
+        if row['worklist'] > WORKLIST_THRESHOLD: causes.append("High Worklist")
+        if row['load'] > LOAD_THRESHOLD: causes.append("High Load")
         
-        if causes:  # If any cause is identified
+        if causes:
             anomalies.append({
                 "timestamp": row['timestamp'],
                 "dpbox": row['dpbox'],
@@ -136,72 +117,52 @@ def correlate_anomalies(df):
                 "leg": row['leg'],
                 "service": row.get('service', 'N/A'),
                 "causes": ", ".join(causes),
-                "metrics": row.to_dict()  # Include all metrics
+                "metrics": row.to_dict(),
             })
-
     return anomalies
 
-# Step 5: Write to Text Files
+# Step 5: Convert Timestamps and Write to Text Files
+def convert_timestamps(obj):
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: convert_timestamps(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_timestamps(item) for item in obj]
+    else:
+        return obj
+
 def write_to_txt(file_name, data):
     try:
-        # Ensure the reports folder exists
         os.makedirs("reports", exist_ok=True)
         file_path = os.path.join("reports", file_name)
-
-        # Write data to the file in JSON format, converting Timestamp to string
         with open(file_path, "w") as f:
             for entry in data:
-                # Convert all Timestamps in the dictionary to strings
-                serialized_entry = {
-                    key: (value.isoformat() if isinstance(value, pd.Timestamp) else value)
-                    for key, value in entry.items()
-                }
+                serialized_entry = convert_timestamps(entry)
                 f.write(json.dumps(serialized_entry) + "\n")
         print(f"Data successfully written to {file_path}")
     except Exception as e:
         print(f"Error writing data to {file_name}: {e}")
 
-# Step 6: Main Execution with Command-Line Input
+# Main Execution
 if __name__ == "__main__":
-    # Parse command-line arguments for start and end time
-    parser = argparse.ArgumentParser(description="Spike and Anomaly Detection")
-    parser.add_argument("--start_time", required=True, help="Start time in format YYYY-MM-DD HH:MM:SS")
-    parser.add_argument("--end_time", required=True, help="End time in format YYYY-MM-DD HH:MM:SS")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start_time", required=True, help="Start time: YYYY-MM-DD HH:MM:SS")
+    parser.add_argument("--end_time", required=True, help="End time: YYYY-MM-DD HH:MM:SS")
     args = parser.parse_args()
 
-    try:
-        # Validate time inputs
-        start_time = datetime.strptime(args.start_time, "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.strptime(args.end_time, "%Y-%m-%d %H:%M:%S")
-    except ValueError as e:
-        print(f"Invalid time format: {e}")
-        exit(1)
-    
-    # Fetch data
-    print(f"Fetching data from {start_time} to {end_time}...")
-    durations_df, counts_df, metrics_df = fetch_data(start_time, end_time)
-    
+    durations_df, counts_df, metrics_df = fetch_data(args.start_time, args.end_time)
     if durations_df is not None and counts_df is not None and metrics_df is not None:
-        # Merge data
-        print("Merging data...")
         merged_data = merge_data(durations_df, counts_df, metrics_df)
-        
-        # Detect spikes
+
         print("Detecting spikes...")
         spikes = detect_spikes(merged_data)
         print(f"Detected {len(spikes)} spikes.")
-        
-        # Correlate anomalies
+        write_to_txt("spikes_report.txt", spikes)
+
         print("Detecting anomalies...")
         anomalies = correlate_anomalies(merged_data)
         print(f"Detected {len(anomalies)} anomalies.")
-        
-        # Write spikes to text file
-        print("Writing spikes to text file...")
-        write_to_txt("spikes_report.txt", spikes)
-        
-        # Write anomalies to text file
-        print("Writing anomalies to text file...")
         write_to_txt("anomalies_report.txt", anomalies)
     else:
         print("Failed to fetch data. Exiting.")
