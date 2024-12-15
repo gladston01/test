@@ -1,181 +1,182 @@
-import pandas as pd
-import os
-import json
-import argparse
-from datetime import datetime
 import psycopg2
+import pandas as pd
+import json
+import os
+from datetime import datetime
+import argparse
 
-# PostgreSQL Database Configuration
-DB_CONFIG = {
-    "dbname": "performance_db",
-    "user": "username",
-    "password": "password",
-    "host": "localhost",
-    "port": 5432,
+REPORTS_FOLDER = "reports"
+HISTORIC_SLA_FILE = "historic_sla.json"
+
+ANOMALY_THRESHOLDS = {
+    "MESSAGE_SPIKE_THRESHOLD": 200,
+    "TPS_THRESHOLD": 300,
+    "CPU_THRESHOLD": 50,
+    "MEMORY_THRESHOLD": 50,
+    "WORKLIST_THRESHOLD": 800,
+    "LOAD_THRESHOLD": 80,
 }
 
-# Thresholds for detecting spikes and anomalies
-MESSAGE_SPIKE_THRESHOLD = 200  # Duration in ms to classify a spike
-CPU_THRESHOLD = 50  # Percentage
-MEMORY_THRESHOLD = 50  # Percentage
-TPS_THRESHOLD = 300  # Transactions per second
-WORKLIST_THRESHOLD = 800
-LOAD_THRESHOLD = 80
 
-# Step 1: Fetch Data from PostgreSQL
-def fetch_data(start_time, end_time):
+def parse_time(input_time):
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        
-        durations_query = f"""
-        SELECT dpbox, leg, domain, service, messagedurations, requestdurations, responsedurations, serverdurations, timestamp
-        FROM dpmessagedurations
-        WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
+        return datetime.strptime(input_time, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        print(f"Invalid time format: {input_time}")
+        raise ValueError("Please provide a valid time in 'YYYY-MM-DD HH:MM:SS' format.")
+
+
+def query_pgsql_with_multiple_metrics(start_time, end_time, db_config):
+    """
+    Fetches data from multiple tables and returns as DataFrames.
+    """
+    queries = {
+        "durations": """
+            SELECT dpbox, leg, domain, service, messagedurations, requestdurations, responsedurations, serverdurations, timestamp
+            FROM dpmessagedurations
+            WHERE timestamp BETWEEN %s AND %s
+        """,
+        "counts": """
+            SELECT dpbox, leg, domain, service, errormessagecount, requestmessagecount, rresponsemessagecount, timestamp
+            FROM dpmessagecounts
+            WHERE timestamp BETWEEN %s AND %s
+        """,
+        "metrics": """
+            SELECT dpbox, leg, domain, cpu, worklist, memory, load, timestamp
+            FROM dpsystemmetrics
+            WHERE timestamp BETWEEN %s AND %s
         """
-        counts_query = f"""
-        SELECT dpbox, leg, domain, service, errormessagecount, requestmessagecount, rresponsemessagecount, timestamp
-        FROM dpmessagecounts
-        WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
-        """
-        metrics_query = f"""
-        SELECT dpbox, leg, domain, cpu, worklist, memory, load, timestamp
-        FROM dpsystemmetrics
-        WHERE timestamp BETWEEN '{start_time}' AND '{end_time}';
-        """
+    }
+
+    try:
+        conn = psycopg2.connect(
+            host=db_config['host'],
+            dbname=db_config['dbname'],
+            user=db_config['user'],
+            password=db_config['password'],
+            port=db_config['port']
+        )
         
-        durations_df = pd.read_sql_query(durations_query, conn)
-        counts_df = pd.read_sql_query(counts_query, conn)
-        metrics_df = pd.read_sql_query(metrics_query, conn)
-        
-        conn.close()
-        return durations_df, counts_df, metrics_df
+        dataframes = {}
+        for key, query in queries.items():
+            with conn.cursor() as cursor:
+                cursor.execute(query, (start_time, end_time))
+                columns = [desc[0] for desc in cursor.description]
+                results = cursor.fetchall()
+                dataframes[key] = pd.DataFrame(results, columns=columns)
+                
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return None, None, None
+        print(f"Error querying the database: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+    
+    return dataframes
 
-# Step 2: Merge Data
-def merge_data(durations_df, counts_df, metrics_df):
-    merged_df = pd.merge(
-        durations_df, counts_df, 
-        on=['dpbox', 'leg', 'domain', 'service', 'timestamp'], 
-        how='inner'
-    )
-    merged_df = pd.merge(
-        merged_df, metrics_df, 
-        on=['dpbox', 'leg', 'domain', 'timestamp'], 
-        how='inner'
-    )
-    return merged_df.fillna(0)
 
-# Step 3: Detect Spikes
-def detect_spikes(df):
-    spikes = []
-    spike_active = False
-    spike_start = None
-    spike_metrics = None
+def detect_anomalies(durations_df, counts_df, metrics_df):
+    """
+    Detects anomalies across multiple metrics.
+    """
+    anomalies = {
+        "high_response_time": [],
+        "backend_issue": [],
+        "high_tps": [],
+        "high_cpu": [],
+        "high_memory": [],
+        "high_worklist": [],
+        "high_load": [],
+    }
 
-    for i, row in df.iterrows():
-        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD:
-            if not spike_active:
-                spike_active = True
-                spike_start = row['timestamp']
-                spike_metrics = row
-            else:
-                spike_metrics = row.combine(spike_metrics, max)
-        else:
-            if spike_active:
-                spike_active = False
-                spikes.append({
-                    "start_time": spike_start,
-                    "end_time": row['timestamp'],
-                    "dpbox": spike_metrics['dpbox'],
-                    "domain": spike_metrics['domain'],
-                    "leg": spike_metrics['leg'],
-                    "service": spike_metrics.get('service', 'N/A'),
-                    "max_metrics": spike_metrics.to_dict(),
-                })
-    return spikes
-
-# Step 4: Correlate Anomalies
-def correlate_anomalies(df):
-    anomalies = []
-
-    for _, row in df.iterrows():
-        causes = []
-
-        # Check only when messagedurations exceeds the threshold
-        if row['messagedurations'] > MESSAGE_SPIKE_THRESHOLD:
-            causes.append("High Response Time")
-            if row['serverdurations'] >= 0.8 * row['messagedurations']:
-                causes.append("Backend Issue")
-
-        if row['requestmessagecount'] > TPS_THRESHOLD:
-            causes.append("High TPS")
-        if row['cpu'] > CPU_THRESHOLD:
-            causes.append("High CPU")
-        if row['memory'] > MEMORY_THRESHOLD:
-            causes.append("High Memory")
-        if row['worklist'] > WORKLIST_THRESHOLD:
-            causes.append("High Worklist")
-        if row['load'] > LOAD_THRESHOLD:
-            causes.append("High Load")
-
-        # If any causes are identified, add this row as an anomaly
-        if causes:
-            anomalies.append({
-                "timestamp": row['timestamp'],
-                "dpbox": row.get('dpbox', 'N/A'),
-                "domain": row.get('domain', 'N/A'),
-                "leg": row.get('leg', 'N/A'),
-                "service": row.get('service', 'N/A'),
-                "causes": ", ".join(causes),
-                "metrics": row.to_dict(),
-            })
-
+    for idx, row in durations_df.iterrows():
+        service, domain, leg, timestamp = row["service"], row["domain"], row["leg"], row["timestamp"]
+        
+        # High Response Time
+        if row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
+            anomalies["high_response_time"].append(f"{service} in {domain} {leg} exceeded response time at {timestamp}")
+        
+        # Backend Issue
+        if row["serverdurations"] >= 0.8 * row["messagedurations"] > ANOMALY_THRESHOLDS["MESSAGE_SPIKE_THRESHOLD"]:
+            anomalies["backend_issue"].append(f"{service} in {domain} {leg} backend issue at {timestamp}")
+    
+    for idx, row in counts_df.iterrows():
+        if row["requestmessagecount"] > ANOMALY_THRESHOLDS["TPS_THRESHOLD"]:
+            anomalies["high_tps"].append(f"{row['service']} in {row['domain']} {row['leg']} exceeded TPS at {row['timestamp']}")
+    
+    for idx, row in metrics_df.iterrows():
+        if row["cpu"] > ANOMALY_THRESHOLDS["CPU_THRESHOLD"]:
+            anomalies["high_cpu"].append(f"{row['service']} in {row['domain']} {row['leg']} high CPU at {row['timestamp']}")
+        if row["memory"] > ANOMALY_THRESHOLDS["MEMORY_THRESHOLD"]:
+            anomalies["high_memory"].append(f"{row['service']} in {row['domain']} {row['leg']} high memory at {row['timestamp']}")
+        if row["worklist"] > ANOMALY_THRESHOLDS["WORKLIST_THRESHOLD"]:
+            anomalies["high_worklist"].append(f"{row['service']} in {row['domain']} {row['leg']} high worklist at {row['timestamp']}")
+        if row["load"] > ANOMALY_THRESHOLDS["LOAD_THRESHOLD"]:
+            anomalies["high_load"].append(f"{row['service']} in {row['domain']} {row['leg']} high load at {row['timestamp']}")
+    
     return anomalies
 
-# Step 5: Convert Timestamps and Write to Text Files
-def convert_timestamps(obj):
-    if isinstance(obj, pd.Timestamp):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: convert_timestamps(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_timestamps(item) for item in obj]
-    else:
-        return obj
 
-def write_to_txt(file_name, data):
-    try:
-        os.makedirs("reports", exist_ok=True)
-        file_path = os.path.join("reports", file_name)
-        with open(file_path, "w") as f:
-            for entry in data:
-                serialized_entry = convert_timestamps(entry)
-                f.write(json.dumps(serialized_entry) + "\n")
-        print(f"Data successfully written to {file_path}")
-    except Exception as e:
-        print(f"Error writing data to {file_name}: {e}")
+def log_anomalies(anomalies):
+    """
+    Logs anomalies into text files.
+    """
+    os.makedirs(REPORTS_FOLDER, exist_ok=True)
+    for anomaly_type, messages in anomalies.items():
+        file_path = os.path.join(REPORTS_FOLDER, f"{anomaly_type}_anomalies.txt")
+        with open(file_path, "w") as file:
+            if messages:
+                file.write("\n".join(messages))
+            else:
+                file.write(f"No {anomaly_type.replace('_', ' ')} anomalies detected.\n")
+    print(f"Anomalies logged to {REPORTS_FOLDER}")
 
-# Main Execution
+
+def load_historic_sla():
+    """
+    Loads historic SLA values from a JSON file.
+    """
+    if os.path.exists(HISTORIC_SLA_FILE):
+        with open(HISTORIC_SLA_FILE, "r") as file:
+            return json.load(file)
+    return {}
+
+
+def save_historic_sla(historic_sla):
+    """
+    Saves historic SLA values to a JSON file.
+    """
+    with open(HISTORIC_SLA_FILE, "w") as file:
+        json.dump(historic_sla, file, indent=4)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--start_time", required=True, help="Start time: YYYY-MM-DD HH:MM:SS")
-    parser.add_argument("--end_time", required=True, help="End time: YYYY-MM-DD HH:MM:SS")
+    parser = argparse.ArgumentParser(description="Query PostgreSQL and detect SLA breaches in duration metrics.")
+    parser.add_argument("--start-time", type=str, required=True, help="Start time in 'YYYY-MM-DD HH:MM:SS' format.")
+    parser.add_argument("--end-time", type=str, required=True, help="End time in 'YYYY-MM-DD HH:MM:SS' format.")
     args = parser.parse_args()
 
-    durations_df, counts_df, metrics_df = fetch_data(args.start_time, args.end_time)
-    if durations_df is not None and counts_df is not None and metrics_df is not None:
-        merged_data = merge_data(durations_df, counts_df, metrics_df)
+    try:
+        start_time = parse_time(args.start_time)
+        end_time = parse_time(args.end_time)
+    except ValueError as e:
+        print(e)
+        exit(1)
 
-        print("Detecting spikes...")
-        spikes = detect_spikes(merged_data)
-        print(f"Detected {len(spikes)} spikes.")
-        write_to_txt("spikes_report.txt", spikes)
+    db_config = {
+        'host': 'localhost',
+        'dbname': 'your_db_name',
+        'user': 'your_user',
+        'password': 'your_password',
+        'port': 5432
+    }
 
-        print("Detecting anomalies...")
-        anomalies = correlate_anomalies(merged_data)
-        print(f"Detected {len(anomalies)} anomalies.")
-        write_to_txt("anomalies_report.txt", anomalies)
+    # Fetch data
+    dataframes = query_pgsql_with_multiple_metrics(start_time, end_time, db_config)
+    
+    if dataframes:
+        anomalies = detect_anomalies(dataframes["durations"], dataframes["counts"], dataframes["metrics"])
+        log_anomalies(anomalies)
+        print("Anomaly detection complete.")
     else:
-        print("Failed to fetch data. Exiting.")
+        print("No data found for the given time range.")
