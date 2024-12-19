@@ -1,196 +1,32 @@
-import os
-import re
-import argparse
 import pandas as pd
-import psycopg2
-from psycopg2.extras import DictCursor
-import logging
-from datetime import datetime, timedelta
+import sys
+import os
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+def merge_jtl_files(file1_path, file2_path, output_folder):
+    # Read the two JTL files into DataFrames
+    df1 = pd.read_csv(file1_path)
+    df2 = pd.read_csv(file2_path)
 
-# Constants for JTL column names
-JTL_COLUMNS = [
-    "timeStamp", "elapsed", "label", "responseCode", "responseMessage",
-    "threadName", "dataType", "success", "failureMessage", "bytes", "sentBytes",
-    "grpThreads", "allThreads", "URL", "Latency", "IdleTime", "Connect"
-]
+    # Merge the two DataFrames
+    merged_df = pd.concat([df1, df2], ignore_index=True)
 
-def extract_uri(url):
-    """Extract the URI path from the URL, including the version.
+    # Generate the output file name in the same folder as the input files
+    output_file_path = os.path.join(output_folder, "merged_output.jtl")
+    merged_df.to_csv(output_file_path, index=False)
 
-    Args:
-        url (str): The URL from which to extract the URI.
-
-    Returns:
-        tuple: A tuple containing the base URI path and the version, or None if extraction fails.
-    """
-    if not isinstance(url, str):
-        return None, None
-    match = re.search(r'(https?://[^/]+)(/[^\?]*)/v(\d+)', url)
-    if match:
-        return match.group(2) + '/', 'v' + match.group(3)
-    return None, None
-
-def load_jtl(jtl_filepath):
-    """Load JTL file into a DataFrame and process URIs.
-
-    Args:
-        jtl_filepath (str): Path to the JTL file.
-
-    Returns:
-        pd.DataFrame: A DataFrame containing processed JTL data with extracted URIs.
-        None: If the JTL file is missing or cannot be processed.
-    """
-    if not os.path.exists(jtl_filepath):
-        logging.error(f"JTL file not found: {jtl_filepath}")
-        return None
-
-    try:
-        df = pd.read_csv(jtl_filepath, names=JTL_COLUMNS, header=0, dtype={'responseCode': 'object'}, low_memory=True)
-        df[['URI', 'Version']] = df['URL'].apply(lambda x: pd.Series(extract_uri(x)))
-        df.dropna(subset=['URI', 'elapsed'], inplace=True)
-        return df
-    except FileNotFoundError as e:
-        logging.error(f"Error reading JTL file: {e}")
-        return None
-
-def query_pgsql(uri, connection, mode):
-    """Query the PostgreSQL table for statistics based on the URI and mode.
-
-    Args:
-        uri (str): The URI to query.
-        connection (psycopg2.Connection): A connection object to the PostgreSQL database.
-        mode (str): The mode of comparison ('previousMonth' or 'peakMonth').
-
-    Returns:
-        dict: A dictionary containing production statistics based on the mode.
-        None: If no data is found for the given URI.
-    """
-    try:
-        with connection.cursor(cursor_factory=DictCursor) as cursor:
-            if mode == 'previousMonth':
-                last_month_start = (datetime.now().replace(day=1) - timedelta(days=1)).replace(day=1)
-                last_month_end = datetime.now().replace(day=1) - timedelta(days=1)
-
-                query = """
-                    SELECT "Date", "uriPath", "avg", "p95"
-                    FROM "DataPower".monthlysplit
-                    WHERE "uriPath" LIKE %s AND "Date" BETWEEN %s AND %s
-                    ORDER BY "Date" DESC
-                    LIMIT 1
-                """
-                cursor.execute(query, (uri + '%', last_month_start, last_month_end))
-
-            elif mode == 'peakMonth':
-                query = """
-                    SELECT "Date", "uriPath", "avg", "p95"
-                    FROM "DataPower".monthlysplit
-                    WHERE "uriPath" LIKE %s
-                    ORDER BY "grpThreads" DESC, "Date" DESC
-                    LIMIT 1
-                """
-                cursor.execute(query, (uri + '%',))
-
-            else:
-                logging.error(f"Invalid comparison mode: {mode}")
-                return None
-
-            return cursor.fetchone()
-    except psycopg2.Error as e:
-        logging.error(f"Error querying database for URI {uri} in mode {mode}: {e}")
-        return None
-
-def process_statistics(df, connection, output_file, comparison_mode):
-    """Process statistics for each unique URI and compare with production data.
-
-    Args:
-        df (pd.DataFrame): DataFrame containing the test statistics.
-        connection (psycopg2.Connection): Connection to the PostgreSQL database.
-        output_file (str): Path to the output file for storing comparison results.
-        comparison_mode (str): The mode of comparison ('previousMonth' or 'peakMonth').
-
-    Returns:
-        None
-    """
-    unique_uris = df[['URI', 'Version']].drop_duplicates()
-    
-    with open(output_file, 'w') as f:
-        f.write("Slack Notification Content:\n")
-        f.write("==========================\n\n")
-
-        for _, row in unique_uris.iterrows():
-            uri = row['URI']
-            version = row['Version']
-            logging.info(f"Processing URI: {uri} with version {version}")
-
-            # Extract test statistics
-            test_stats = df[df['URI'] == uri]
-            test_avg = test_stats['elapsed'].mean()
-            test_p95 = test_stats['elapsed'].quantile(0.95)
-
-            # Query production data
-            production_data = query_pgsql(uri, connection, comparison_mode)
-
-            if production_data:
-                prod_date = production_data['Date']
-                prod_avg = production_data['avg']
-                prod_p95 = production_data['p95']
-
-                f.write(f"{uri}{version}\n")
-                f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
-                f.write(f"Production ({comparison_mode} data - {prod_date}): Avg - {prod_avg:.2f}, 95% - {prod_p95:.2f}\n\n")
-            else:
-                f.write(f"{uri}{version}\n")
-                f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
-                f.write(f"No production data available for mode: {comparison_mode}.\n\n")
-
-def main():
-    """Main function to orchestrate the process.
-
-    Returns:
-        None
-    """
-    parser = argparse.ArgumentParser(description="Process JTL file and compare statistics.")
-    parser.add_argument("--jtl-file", required=True, help="Path to the JTL file")
-    parser.add_argument("--output-dir", default="output/reports", help="Directory to store the output report")
-    parser.add_argument("--comparison-mode", default="previousMonth", choices=["previousMonth", "peakMonth"], help="Comparison mode: 'previousMonth' or 'peakMonth'")
-    args = parser.parse_args()
-
-    jtl_file = args.jtl_file
-    output_dir = args.output_dir
-    comparison_mode = args.comparison_mode
-
-    db_config = {
-        'dbname': 'your_database',
-        'user': 'your_username',
-        'password': 'your_password',
-        'host': 'your_host',
-        'port': 'your_port'
-    }
-
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, 'URI_comparison_report.txt')
-
-    # Load JTL data
-    df = load_jtl(jtl_file)
-    if df is None:
-        logging.error("Failed to process JTL file.")
-        return
-
-    # Connect to PostgreSQL
-    try:
-        connection = psycopg2.connect(**db_config)
-        process_statistics(df, connection, output_file, comparison_mode)
-        logging.info(f"Report generated successfully at {output_file}")
-    except psycopg2.Error as e:
-        logging.exception("Database error occurred while processing.")
-    except FileNotFoundError as e:
-        logging.exception("JTL file not found.")
-    finally:
-        if connection:
-            connection.close()
+    print(f"Merged file saved to {output_file_path}")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 4:
+        print("Usage: python merge_jtl.py <file1_path> <file2_path> <output_folder>")
+        sys.exit(1)
+    
+    file1_path = sys.argv[1]
+    file2_path = sys.argv[2]
+    output_folder = sys.argv[3]
+
+    # Ensure the output folder exists
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    merge_jtl_files(file1_path, file2_path, output_folder)
