@@ -1,5 +1,6 @@
 import os
 import re
+import argparse
 import pandas as pd
 import psycopg2
 from psycopg2.extras import DictCursor
@@ -139,22 +140,34 @@ def process_statistics(df, connection, output_file, comparison_mode):
                 f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
                 f.write("Service not found in production stats, possible new service.\n\n")
 
-def main(jtl_file, db_config, output_dir, comparison_mode):
-    """Main function to orchestrate the process.
+def main():
+    """Main function to orchestrate the process."""
+    parser = argparse.ArgumentParser(description="Analyze JTL files and compare with production data.")
+    parser.add_argument("--jtl-file", required=True, help="Path to the JTL file")
+    parser.add_argument("--output-dir", default="output/reports", help="Directory to store the output report")
+    parser.add_argument("--comparison-mode", choices=["previousMonth", "peakMonth"], default="previousMonth",
+                        help="Comparison mode to use")
+    parser.add_argument("--db-name", required=True, help="Database name")
+    parser.add_argument("--db-user", required=True, help="Database user")
+    parser.add_argument("--db-password", required=True, help="Database password")
+    parser.add_argument("--db-host", required=True, help="Database host")
+    parser.add_argument("--db-port", required=True, help="Database port")
 
-    Args:
-        jtl_file (str): Path to the JTL file.
-        db_config (dict): Dictionary containing PostgreSQL database connection parameters.
-        output_dir (str): Directory to store the output report.
-        comparison_mode (str): The mode of comparison ('previousMonth' or 'peakMonth').
+    args = parser.parse_args()
 
-    Returns:
-        None
-    """
-    output_file = os.path.join(output_dir, 'URI_comparison_report.txt')
+    db_config = {
+        'dbname': args.db_name,
+        'user': args.db_user,
+        'password': args.db_password,
+        'host': args.db_host,
+        'port': args.db_port
+    }
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_file = os.path.join(args.output_dir, 'URI_comparison_report.txt')
 
     # Load JTL data
-    df = load_jtl(jtl_file)
+    df = load_jtl(args.jtl_file)
     if df is None:
         logging.error("Failed to process JTL file.")
         return
@@ -162,7 +175,7 @@ def main(jtl_file, db_config, output_dir, comparison_mode):
     # Connect to PostgreSQL
     try:
         connection = psycopg2.connect(**db_config)
-        process_statistics(df, connection, output_file, comparison_mode)
+        process_statistics(df, connection, output_file, args.comparison_mode)
         logging.info(f"Report generated successfully at {output_file}")
     except psycopg2.Error as e:
         logging.exception("Database error occurred while processing.")
@@ -173,18 +186,4 @@ def main(jtl_file, db_config, output_dir, comparison_mode):
             connection.close()
 
 if __name__ == "__main__":
-    # Example configuration for PostgreSQL
-    db_config = {
-        'dbname': 'your_database',
-        'user': 'your_username',
-        'password': 'your_password',
-        'host': 'your_host',
-        'port': 'your_port'
-    }
-
-    jtl_file = "path/to/your.jtl"
-    output_dir = "output/reports"
-    comparison_mode = "previousMonth"  # Can be "previousMonth" or "peakMonth"
-    os.makedirs(output_dir, exist_ok=True)
-
-    main(jtl_file, db_config, output_dir, comparison_mode)
+    main()
