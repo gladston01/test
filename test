@@ -1,6 +1,5 @@
 import os
 import re
-import argparse
 import pandas as pd
 import psycopg2
 from psycopg2.extras import DictCursor
@@ -56,18 +55,18 @@ def load_jtl(jtl_filepath):
         logging.error(f"Error reading JTL file: {e}")
         return None
 
-def query_pgsql_bulk(uris, connection, mode):
-    """Query the PostgreSQL table for all URIs in bulk.
+def query_pgsql(uri, connection, mode):
+    """Query the PostgreSQL table for statistics based on the URI and mode.
 
     Args:
-        uris (list): List of URIs to query.
+        uri (str): The URI to query.
         connection (psycopg2.Connection): A connection object to the PostgreSQL database.
         mode (str): The mode of comparison ('previousMonth' or 'peakMonth').
 
     Returns:
-        dict: A dictionary with URIs as keys and production statistics as values.
+        dict: A dictionary containing production statistics based on the mode.
+        None: If no data is found for the given URI.
     """
-    results = {}
     try:
         with connection.cursor(cursor_factory=DictCursor) as cursor:
             if mode == 'previousMonth':
@@ -75,28 +74,32 @@ def query_pgsql_bulk(uris, connection, mode):
                 last_month_end = datetime.now().replace(day=1) - timedelta(days=1)
 
                 query = """
-                    SELECT "uriPath", "Date", "avg", "p95"
+                    SELECT "Date", "uriPath", "avg", "p95"
                     FROM "DataPower".monthlysplit
-                    WHERE "uriPath" = ANY(%s) AND "Date" BETWEEN %s AND %s
+                    WHERE "uriPath" LIKE %s AND "Date" BETWEEN %s AND %s
                     ORDER BY "Date" DESC
+                    LIMIT 1
                 """
-                cursor.execute(query, (uris, last_month_start, last_month_end))
+                cursor.execute(query, (uri + '%', last_month_start, last_month_end))
 
             elif mode == 'peakMonth':
                 query = """
-                    SELECT DISTINCT ON ("uriPath") "uriPath", "Date", "avg", "p95"
+                    SELECT "Date", "uriPath", "avg", "p95"
                     FROM "DataPower".monthlysplit
-                    WHERE "uriPath" = ANY(%s)
-                    ORDER BY "uriPath", "grpThreads" DESC, "Date" DESC
+                    WHERE "uriPath" LIKE %s
+                    ORDER BY "grpThreads" DESC, "Date" DESC
+                    LIMIT 1
                 """
-                cursor.execute(query, (uris,))
+                cursor.execute(query, (uri + '%',))
 
-            for row in cursor.fetchall():
-                results[row["uriPath"]] = row
+            else:
+                logging.error(f"Invalid comparison mode: {mode}")
+                return None
 
+            return cursor.fetchone()
     except psycopg2.Error as e:
-        logging.error(f"Error querying database in mode {mode}: {e}")
-    return results
+        logging.error(f"Error querying database for URI {uri} in mode {mode}: {e}")
+        return None
 
 def process_statistics(df, connection, output_file, comparison_mode):
     """Process statistics for each unique URI and compare with production data.
@@ -110,27 +113,29 @@ def process_statistics(df, connection, output_file, comparison_mode):
     Returns:
         None
     """
-    unique_uris = df['URI'].unique()
-    # Query production data in bulk
-    production_data = query_pgsql_bulk(unique_uris.tolist(), connection, comparison_mode)
-
-    # Group the DataFrame by URI to process test stats
-    grouped = df.groupby('URI')
-
+    unique_uris = df[['URI', 'Version']].drop_duplicates()
+    
     with open(output_file, 'w') as f:
         f.write("Slack Notification Content:\n")
         f.write("==========================\n\n")
 
-        for uri, group in grouped:
-            version = group['Version'].iloc[0]
-            test_avg = group['elapsed'].mean()
-            test_p95 = group['elapsed'].quantile(0.95)
+        for _, row in unique_uris.iterrows():
+            uri = row['URI']
+            version = row['Version']
+            logging.info(f"Processing URI: {uri} with version {version}")
 
-            prod_data = production_data.get(uri)
-            if prod_data:
-                prod_date = prod_data['Date']
-                prod_avg = prod_data['avg']
-                prod_p95 = prod_data['p95']
+            # Extract test statistics
+            test_stats = df[df['URI'] == uri]
+            test_avg = test_stats['elapsed'].mean()
+            test_p95 = test_stats['elapsed'].quantile(0.95)
+
+            # Query production data
+            production_data = query_pgsql(uri, connection, comparison_mode)
+
+            if production_data:
+                prod_date = production_data['Date']
+                prod_avg = production_data['avg']
+                prod_p95 = production_data['p95']
 
                 f.write(f"{uri}{version}\n")
                 f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
@@ -138,31 +143,24 @@ def process_statistics(df, connection, output_file, comparison_mode):
             else:
                 f.write(f"{uri}{version}\n")
                 f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
-                f.write("Service not found in production stats, possible new service.\n\n")
+                f.write(f"No production data available for mode: {comparison_mode}.\n\n")
 
-def main():
-    """Main function to orchestrate the process."""
-    parser = argparse.ArgumentParser(description="Analyze JTL files and compare with production data.")
-    parser.add_argument("--jtl-file", required=True, help="Path to the JTL file")
+def main(jtl_file, db_config, output_dir, comparison_mode):
+    """Main function to orchestrate the process.
 
-    args = parser.parse_args()
+    Args:
+        jtl_file (str): Path to the JTL file.
+        db_config (dict): Dictionary containing PostgreSQL database connection parameters.
+        output_dir (str): Directory to store the output report.
+        comparison_mode (str): The mode of comparison ('previousMonth' or 'peakMonth').
 
-    # Database configuration
-    db_config = {
-        'dbname': 'your_database',
-        'user': 'your_username',
-        'password': 'your_password',
-        'host': 'your_host',
-        'port': 'your_port'
-    }
-
-    output_dir = "output/reports"
-    comparison_mode = "previousMonth"  # Can be "previousMonth" or "peakMonth"
-    os.makedirs(output_dir, exist_ok=True)
+    Returns:
+        None
+    """
     output_file = os.path.join(output_dir, 'URI_comparison_report.txt')
 
     # Load JTL data
-    df = load_jtl(args.jtl_file)
+    df = load_jtl(jtl_file)
     if df is None:
         logging.error("Failed to process JTL file.")
         return
@@ -181,4 +179,18 @@ def main():
             connection.close()
 
 if __name__ == "__main__":
-    main()
+    # Example configuration for PostgreSQL
+    db_config = {
+        'dbname': 'your_database',
+        'user': 'your_username',
+        'password': 'your_password',
+        'host': 'your_host',
+        'port': 'your_port'
+    }
+
+    jtl_file = "path/to/your.jtl"
+    output_dir = "output/reports"
+    comparison_mode = "previousMonth"  # Can be "previousMonth" or "peakMonth"
+    os.makedirs(output_dir, exist_ok=True)
+
+    main(jtl_file, db_config, output_dir, comparison_mode)
