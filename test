@@ -17,18 +17,20 @@ JTL_COLUMNS = [
 ]
 
 def extract_uri(url):
-    """Extract the URI path from the URL, excluding the version.
+    """Extract the URI path from the URL, including the version.
 
     Args:
         url (str): The URL from which to extract the URI.
 
     Returns:
-        str: The extracted URI path or None if extraction fails.
+        tuple: A tuple containing the base URI path and the version, or None if extraction fails.
     """
-    match = re.search(r'(https?://[^/]+)(/[^\?]*)/v\d+', url)
+    if not isinstance(url, str):
+        return None, None
+    match = re.search(r'(https?://[^/]+)(/[^\?]*)/v(\d+)', url)
     if match:
-        return match.group(2) + '/'
-    return None
+        return match.group(2) + '/', 'v' + match.group(3)
+    return None, None
 
 def load_jtl(jtl_filepath):
     """Load JTL file into a DataFrame and process URIs.
@@ -46,7 +48,7 @@ def load_jtl(jtl_filepath):
 
     try:
         df = pd.read_csv(jtl_filepath, names=JTL_COLUMNS, header=0, dtype={'responseCode': 'object'}, low_memory=True)
-        df['URI'] = df['URL'].apply(extract_uri)
+        df[['URI', 'Version']] = df['URL'].apply(lambda x: pd.Series(extract_uri(x)))
         df.dropna(subset=['URI', 'elapsed'], inplace=True)
         return df
     except FileNotFoundError as e:
@@ -111,14 +113,16 @@ def process_statistics(df, connection, output_file, comparison_mode):
     Returns:
         None
     """
-    unique_uris = df['URI'].unique()
+    unique_uris = df[['URI', 'Version']].drop_duplicates()
     
     with open(output_file, 'w') as f:
         f.write("Slack Notification Content:\n")
         f.write("==========================\n\n")
 
-        for uri in unique_uris:
-            logging.info(f"Processing URI: {uri}")
+        for _, row in unique_uris.iterrows():
+            uri = row['URI']
+            version = row['Version']
+            logging.info(f"Processing URI: {uri} with version {version}")
 
             # Extract test statistics
             test_stats = df[df['URI'] == uri]
@@ -133,13 +137,13 @@ def process_statistics(df, connection, output_file, comparison_mode):
                 prod_avg = production_data['avg']
                 prod_p95 = production_data['p95']
 
-                f.write(f"{uri}\n")
+                f.write(f"{uri}{version}\n")
                 f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
                 f.write(f"Production ({comparison_mode} data - {prod_date}): Avg - {prod_avg:.2f}, 95% - {prod_p95:.2f}\n\n")
             else:
-                f.write(f"{uri}\n")
+                f.write(f"{uri}{version}\n")
                 f.write(f"Test statistics: Avg - {test_avg:.2f}, 95% - {test_p95:.2f}\n")
-                f.write(f"No production data available for mode: {comparison_mode}.\n\n")
+                f.write(f"Service not found in production stats, possible new service.\n\n")
 
 def main(jtl_file, db_config, output_dir, comparison_mode):
     """Main function to orchestrate the process.
