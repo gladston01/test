@@ -1,32 +1,157 @@
-import pandas as pd
-import sys
-import os
+import hudson.model.*
+import jenkins.model.*
+import hudson.tasks.test.AbstractTestResultAction
 
-def merge_jtl_files(file1_path, file2_path, output_folder):
-    # Read the two JTL files into DataFrames
-    df1 = pd.read_csv(file1_path)
-    df2 = pd.read_csv(file2_path)
+pipeline {
+    agent none
 
-    # Merge the two DataFrames
-    merged_df = pd.concat([df1, df2], ignore_index=True)
+    parameters {
+        choice(choices: ['NFTE25', 'FTE32', 'FTE22', 'FTE12'], name: 'Environment')
+        string(defaultValue: 'Master25.2', description: 'Release (Git Branch Name)', name: 'branchName')
+        choice(choices: ['Unsecured', 'Secured'], description: 'Service type', name: 'tokenType')
+        string(defaultValue: '', description: 'List of VS names to start as part of HC (comma-separated)', name: 'VSNAMES')
+    }
 
-    # Generate the output file name in the same folder as the input files
-    output_file_path = os.path.join(output_folder, "merged_output.jtl")
-    merged_df.to_csv(output_file_path, index=False)
+    options {
+        timeout(time: 45, unit: 'MINUTES')
+    }
 
-    print(f"Merged file saved to {output_file_path}")
+    stages {
 
-if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: python merge_jtl.py <file1_path> <file2_path> <output_folder>")
-        sys.exit(1)
-    
-    file1_path = sys.argv[1]
-    file2_path = sys.argv[2]
-    output_folder = sys.argv[3]
+        stage('Check InProgress Jobs') {
+            agent { node { label '1444444001' }}
+            steps {
+                script {
+                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
+                    def buildURL = env.BUILD_URL
+                    while (fileExists(lockFile)) {
+                        def buildUrlFile = readFile(lockFile)
+                        echo "Another Health check job is running. Waiting 2 minutes before checking status...\nJob URL: ${buildUrlFile}"
+                        sleep 120
+                    }
+                    writeFile file: lockFile, text: buildURL
+                }
+            }
+        }
 
-    # Ensure the output folder exists
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    merge_jtl_files(file1_path, file2_path, output_folder)
+        stage('GitLabCheckout') {
+            agent { node { label '1444444001' }}
+            steps {
+                script {
+                    try {
+                        now = new Date()
+                        user = currentBuild.rawBuild.getCause(Cause.UserIdCause)?.getUserName() ?: "Timer"
+                        echo "Build triggered by: ${user}"
+                    } catch (Exception e) {
+                        user = "Timer"
+                        echo "Exception caught. Defaulting user to: ${user}"
+                    }
+                    checkout([$class: 'GitSCM',
+                        branches: [[name: params.branchName]],
+                        extensions: [[$class: 'CloneOption', shallow: true, depth: 1, timeout: 30]],
+                        userRemoteConfigs: [[credentialsId: 'DigiBankingServer', url: 'https://<url>.git']]])
+                }
+            }
+        }
+
+        stage('Start DevTest VS') {
+            agent { node { label '2288882828' }}
+            steps {
+                script {
+                    def VSNames = params.VSNAMES.split(',')
+                    for (vsName in VSNames) {
+                        vsName = vsName.trim()
+                        if (vsName) {
+                            try {
+                                bat "\"C:\\Program Files\\CA\\DevTest\\bin\\start_VS.bat\" ${vsName}"
+                            } catch (Exception e) {
+                                echo "Error starting ${vsName}: ${e}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Run NFT Sanity-Pack') {
+            agent { node { label '1444444001' }}
+            steps {
+                script {
+                    def filePath = 'D:/jenkins_agent/workspace/TokenType_NFT.txt'
+                    writeFile file: filePath, text: params.tokenType
+                    echo "Running SoapUI tests for environment: ${params.Environment}"
+
+                    bat "\"C:\\Program Files\\SmartBear\\ReadyAPI-3.50.0\\bin\\testrunner.bat\" -e ${params.Environment} -j ${env.WORKSPACE}/Project"
+                }
+            }
+        }
+
+        stage('Slack Notification OpenID') {
+            agent { node { label '1444444001' }}
+            steps {
+                script {
+                    def openIDContent = readFile('D:/jenkins_agent/workspace/OpenIDResponseSize.txt')
+                    if (openIDContent) {
+                        def message = "*OpenID Response Size:*\n${openIDContent}"
+                        slackSend(channel: '#test-notification', message: message)
+                        echo "Sent OpenID response size notification to Slack."
+                    } else {
+                        echo "OpenID response size file is empty or missing."
+                    }
+                }
+            }
+        }
+
+        stage('Slack Notification Changes') {
+            steps {
+                script {
+                    def changeLog = ""
+                    def changeLogSets = currentBuild.changeSets
+
+                    for (int i = 0; i < changeLogSets.size(); i++) {
+                        def entries = changeLogSets[i].items
+                        for (int j = 0; j < entries.length; j++) {
+                            def entry = entries[j]
+                            changeLog += "${entry.msg}\n"
+                        }
+                    }
+
+                    if (changeLog.trim()) {
+                        slackSend(color: '#6CDEF4', channel: '#test-notification', message: "*Changes since last build:*\n${changeLog}")
+                        echo "Sent change log to Slack."
+                    } else {
+                        slackSend(color: '#6CDEF4', channel: '#test-notification', message: "No changes since last build.")
+                        echo "No changes since last build."
+                    }
+                }
+            }
+        }
+
+        stage('Release Lock') {
+            agent { node { label '1444444001' }}
+            steps {
+                script {
+                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
+                    if (fileExists(lockFile)) {
+                        echo "Releasing lock file..."
+                        bat "del ${lockFile}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                node('1444444001') {
+                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
+                    if (fileExists(lockFile)) {
+                        echo "Cleaning up lock file..."
+                        bat "del ${lockFile}"
+                    }
+                }
+            }
+        }
+    }
+}
