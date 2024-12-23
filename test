@@ -1,156 +1,49 @@
-import hudson.model.*
-import jenkins.model.*
-import hudson.tasks.test.AbstractTestResultAction
+stage('Calculate Test Metrics and Notify Slack') {
+    agent { node { label '1444444001' }}
+    steps {
+        script {
+            // Read additional files for calculations
+            def disabledListCount = powershell(returnStdout: true, script: "(Get-Content D:\\jenkins_agent\\workspace\\DisabledTestCaseList.txt | Measure-Object -Line).Lines").trim()
+            def failedCasesContent = readFile('D:/test/12.txt')
+            def tokenCalls = readFile('D:/jenkins_agent/workspace/TokenCallCount.txt').toInteger()
 
-pipeline {
-    agent none
+            // Extract test metrics from Jenkins build results
+            AbstractTestResultAction testResultAction = currentBuild.rawBuild.getAction(AbstractTestResultAction.class)
 
-    parameters {
-        choice(choices: ['NFTE25', 'FTE32', 'FTE22', 'FTE12'], name: 'Environment')
-        string(defaultValue: 'Master25.2', description: 'Release (Git Branch Name)', name: 'branchName')
-        choice(choices: ['Unsecured', 'Secured'], description: 'Service type', name: 'tokenType')
-        string(defaultValue: '', description: 'List of VS names to start as part of HC (comma-separated)', name: 'VSNAMES')
-    }
+            if (testResultAction != null) {
+                def totalTests = testResultAction.totalCount
+                def failedTests = testResultAction.failCount
+                def passedTests = totalTests - failedTests
+                def passPercent = (passedTests / totalTests) * 100
+                def duration = currentBuild.durationString.split("and")[0]
+                def buildNumber = env.BUILD_NUMBER
+                def projectName = env.JOB_NAME.replaceAll(/.*NFT\//, '').toUpperCase()
+                def status = currentBuild.currentResult
 
-    options {
-        timeout(time: 45, unit: 'MINUTES')
-    }
+                // Construct the Slack message
+                def slackMessage = """*${projectName} - ${status}*
+                    *Release:* ${params.branchName}
+                    *Environment:* ${params.Environment}
+                    *Triggered by:* ${user}
+                    *Build:* <https://<URL>/${buildNumber}/|#${buildNumber}>
+                    *Build Time:* ${duration}
+                    *Route:* ${params.tokenType}
+                    *Test Cases Executed:* ${totalTests}
+                    *Failed:* ${failedTests}
+                    *Disabled:* ${disabledListCount}
+                    *Pass Percentage:* ${passPercent}%
+                    *Test Report:* <https://<URL>/${buildNumber}/testReport/|View Report>"""
 
-    stages {
+                echo "Sending Slack notification..."
 
-        stage('Check InProgress Jobs') {
-            agent { node { label '1444444001' }}
-            steps {
-                script {
-                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
-                    def buildURL = env.BUILD_URL
-                    while (fileExists(lockFile)) {
-                        def buildUrlFile = readFile(lockFile)
-                        echo "Another Health check job is running. Waiting 2 minutes before checking status...\nJob URL: ${buildUrlFile}"
-                        sleep 120
-                    }
-                    writeFile file: lockFile, text: buildURL
-                }
-            }
-        }
+                // Determine Slack message color
+                def color = status == 'SUCCESS' ? 'good' : 'danger'
 
-        stage('GitLabCheckout') {
-            agent { node { label '1444444001' }}
-            steps {
-                script {
-                    try {
-                        now = new Date()
-                        user = currentBuild.rawBuild.getCause(Cause.UserIdCause)?.getUserName() ?: "Timer"
-                        echo "Build triggered by: ${user}"
-                    } catch (Exception e) {
-                        user = "Timer"
-                        echo "Exception caught. Defaulting user to: ${user}"
-                    }
-                    checkout([$class: 'GitSCM',
-                        branches: [[name: params.branchName]],
-                        extensions: [[$class: 'CloneOption', shallow: true, depth: 1, timeout: 30]],
-                        userRemoteConfigs: [[credentialsId: 'DigiBankingServer', url: 'https://<url>.git']]])
-                }
-            }
-        }
-
-        stage('Start DevTest VS') {
-            agent { node { label '2288882828' }}
-            steps {
-                script {
-                    def VSNames = params.VSNAMES.split(',')
-                    for (vsName in VSNames) {
-                        vsName = vsName.trim()
-                        if (vsName) {
-                            try {
-                                bat "\"C:\\Program Files\\CA\\DevTest\\bin\\start_VS.bat\" ${vsName}"
-                            } catch (Exception e) {
-                                echo "Error starting ${vsName}: ${e}"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Run NFT Sanity-Pack') {
-            agent { node { label '1444444001' }}
-            steps {
-                script {
-                    def filePath = 'D:/jenkins_agent/workspace/TokenType_NFT.txt'
-                    writeFile file: filePath, text: params.tokenType
-                    echo "Running SoapUI tests for environment: ${params.Environment}"
-
-                    bat "\"C:\\Program Files\\SmartBear\\ReadyAPI-3.50.0\\bin\\testrunner.bat\" -e ${params.Environment} -j ${env.WORKSPACE}/Project"
-                }
-            }
-        }
-
-        stage('Slack Notification OpenID') {
-            agent { node { label '1444444001' }}
-            steps {
-                script {
-                    def openIDContent = readFile('D:/jenkins_agent/workspace/OpenIDResponseSize.txt')
-                    if (openIDContent) {
-                        def message = "*OpenID Response Size:*\n${openIDContent}"
-                        slackSend(channel: '#test-notification', message: message)
-                        echo "Sent OpenID response size notification to Slack."
-                    } else {
-                        echo "OpenID response size file is empty or missing."
-                    }
-                }
-            }
-        }
-
-        stage('Slack Notification Changes') {
-            steps {
-                script {
-                    def changeLog = ""
-                    def changeLogSets = currentBuild.changeSets
-
-                    for (int i = 0; i < changeLogSets.size(); i++) {
-                        def entries = changeLogSets[i].items
-                        for (int j = 0; j < entries.length; j++) {
-                            def entry = entries[j]
-                            changeLog += "${entry.msg}\n"
-                        }
-                    }
-
-                    if (changeLog.trim()) {
-                        slackSend(color: '#6CDEF4', channel: '#test-notification', message: "*Changes since last build:*\n${changeLog}")
-                        echo "Sent change log to Slack."
-                    } else {
-                        slackSend(color: '#6CDEF4', channel: '#test-notification', message: "No changes since last build.")
-                        echo "No changes since last build."
-                    }
-                }
-            }
-        }
-
-        stage('Release Lock') {
-            agent { node { label '1444444001' }}
-            steps {
-                script {
-                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
-                    if (fileExists(lockFile)) {
-                        echo "Releasing lock file..."
-                        bat "del ${lockFile}"
-                    }
-                }
-            }
-        }
-    }
-
-    post {
-        always {
-            script {
-                node('1444444001') {
-                    def lockFile = 'D:\\JenkinsNode\\lockfile.lock'
-                    if (fileExists(lockFile)) {
-                        echo "Cleaning up lock file..."
-                        bat "del ${lockFile}"
-                    }
-                }
+                // Send Slack notifications
+                slackSend(channel: '#test-notification', color: color, message: slackMessage)
+                slackSend(channel: '#test-notification', message: failedCasesContent)
+            } else {
+                echo "No test results found to calculate metrics."
             }
         }
     }
