@@ -40,6 +40,9 @@ with open(consolidated_output_file, "w", encoding="utf-8") as output:
     for root, _, files in os.walk(output_location):
         for file in files:
             if "-FAIL.txt" in file:
+                # Log the file being processed
+                print(f"Processing file: {file}")
+
                 # Extract TestSuiteName, TestCaseName, and testStepname from the file name
                 match = re.match(r"(.*)-(.*)-(.*)-\d+-FAIL\.txt", file)
                 if not match:
