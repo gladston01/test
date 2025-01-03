@@ -4,23 +4,30 @@ import re
 import argparse
 
 # Function to extract error messages from relevant tags
-def extract_error_message(soup):
+def extract_error_message(failure_soup):
     # Define the list of possible error tags
     error_tags = [
-        {"tag": re.compile(r".*:errorText$"), "desc": "errorText"},
-        {"tag": "messageText", "desc": "messageText"},
-        {"tag": "message", "desc": "message"},
-        {"tag": "SerErrorMessage", "desc": "SerErrorMessage"},
+        re.compile(r".*:errorText$"),
+        "messageText",
+        "message",
+        "SerErrorMessage",
     ]
 
-    for tag_info in error_tags:
-        if isinstance(tag_info["tag"], str):
-            tag = soup.find(tag_info["tag"])
+    # Look for all matching tags in the soup
+    for tag in error_tags:
+        if isinstance(tag, str):
+            found_tag = failure_soup.find(tag)
         else:  # Regex matching for dynamic tags
-            tag = soup.find(lambda t: t.name and tag_info["tag"].match(t.name))
+            found_tag = failure_soup.find(lambda t: t.name and tag.match(t.name))
 
-        if tag:
-            return tag.text.strip()
+        if found_tag:
+            return found_tag.text.strip()
+
+    # If no matching tags are found, look for <pre> or other generic text containers
+    pre_tag = failure_soup.find("pre")
+    if pre_tag:
+        return pre_tag.text.strip()
+
     return "Unknown failure reason (no matching tags found)"
 
 # Set up argument parser
