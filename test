@@ -1,6 +1,7 @@
 import os
 import re
 import argparse
+import chardet
 
 # Function to extract the failure reason from the response content
 def extract_failure_reason(response_content):
@@ -47,9 +48,13 @@ with open(consolidated_output_file, "w", encoding="utf-8") as output:
 
                 test_suite_name, test_case_name, test_step_name = match.groups()
 
-                # Read the file content
+                # Read the file content with encoding detection
                 file_path = os.path.join(root, file)
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, "rb") as f:
+                    raw_data = f.read()
+                    detected_encoding = chardet.detect(raw_data)["encoding"]
+
+                with open(file_path, "r", encoding=detected_encoding, errors="replace") as f:
                     file_content = f.read()
 
                 # Extract the response section using a flexible regex for separator lines
