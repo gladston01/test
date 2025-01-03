@@ -5,31 +5,40 @@ import argparse
 
 # Function to extract error messages from relevant tags
 def extract_error_message(failure_soup):
-    # Define the list of possible error tags
+    # Define the list of specific error tags
     error_tags = [
-        re.compile(r".*:errorText$"),
+        re.compile(r".*:errorText$"),  # Handles dynamic prefixes like <ns1:errorText>
         "messageText",
         "message",
         "SerErrorMessage",
     ]
 
-    # Debug: Print all tags in the current failure_soup
-    print("Debug: Available tags in failure_soup:")
-    for tag in failure_soup.find_all(True):  # Find all tags
-        print(tag.name)
-
-    # Look for all matching tags in the soup
+    # Look for specific error tags
     for tag in error_tags:
         if isinstance(tag, str):
             found_tag = failure_soup.find(tag)
-        else:  # Regex matching for dynamic tags
+        else:  # Regex matching for dynamic tag names
             found_tag = failure_soup.find(lambda t: t.name and tag.match(t.name))
 
         if found_tag:
             return found_tag.text.strip()
 
-    # Return debug message if no tags are found
-    return "No matching error tag found in provided HTML."
+    # If no specific error tags are found, look for broader tags
+    relevant_tags = ["pre", "h3", "b"]
+    error_messages = []
+
+    for tag in relevant_tags:
+        found_tags = failure_soup.find_all(tag)
+        for found in found_tags:
+            # Extract text and clean it
+            text = found.get_text(strip=True)
+            if text:  # Avoid adding empty text
+                error_messages.append(text)
+
+    # Join all found messages, if any, or return a default message
+    if error_messages:
+        return " | ".join(error_messages)
+    return "No meaningful error message found."
 
 # Set up argument parser
 parser = argparse.ArgumentParser(description="Extract failure details from an HTML file.")
@@ -74,8 +83,6 @@ with open(output_file, 'w', encoding='utf-8') as output:
         for test_step_name in test_step_matches:
             # Extract the failure reason for each test step
             failure_reason = extract_error_message(failure_soup)
-            if failure_reason.startswith("No matching error tag"):
-                output.write(f"Debug: Failure details HTML: {failure_details_html}\n")
 
             # Write the extracted information to the output file
             output.write(f"Test Case Name: {test_case_name}\n")
