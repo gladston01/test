@@ -1,30 +1,32 @@
 import sys
-from lxml import etree
+from bs4 import BeautifulSoup
 import re
 import argparse
 
 # Function to extract error messages from relevant tags
-def extract_error_message(failure_html):
-    # Parse the HTML content using lxml
-    parser = etree.HTMLParser()
-    tree = etree.HTML(failure_html, parser=parser)
-
+def extract_error_message(failure_soup):
     # Define the list of specific error tags
     error_tags = [
-        ".//*[contains(local-name(), 'errorText')]",  # Handles dynamic prefixes like <ns1:errorText>
-        ".//messageText",
-        ".//message",
-        ".//SerErrorMessage",
+        re.compile(r".*:errorText$"),  # Handles dynamic prefixes like <ns1:errorText>
+        "messageText",
+        "message",
+        "SerErrorMessage",
     ]
 
-    # Search for specific error tags
-    for xpath in error_tags:
-        found_elements = tree.xpath(xpath)
-        if found_elements:
-            # Extract and clean text from found elements
-            error_messages = [etree.tostring(e, method="text", encoding="unicode").strip() for e in found_elements if e.text]
-            if error_messages:
-                return " | ".join(error_messages)
+    # Debug: Print all available tags
+    print("Debug: Available tags in failure_soup:")
+    for tag in failure_soup.find_all(True):  # List all tags
+        print(f"Tag: {tag.name}, Content: {tag.get_text(strip=True)}")
+
+    # Look for specific error tags
+    for tag in error_tags:
+        if isinstance(tag, str):
+            found_tags = failure_soup.find_all(tag)
+        else:  # Regex matching for dynamic tag names
+            found_tags = failure_soup.find_all(lambda t: t.name and tag.match(t.name))
+
+        if found_tags:
+            return " | ".join(tag.get_text(strip=True) for tag in found_tags)
 
     # If no specific error tags are found, return a default message
     return "No meaningful error message found."
@@ -44,31 +46,25 @@ except FileNotFoundError:
     print(f"Error: File '{input_file}' not found.")
     sys.exit(1)
 
-# Parse the HTML content using lxml
-parser = etree.HTMLParser()
-tree = etree.HTML(html_content, parser=parser)
+# Parse the HTML content using BeautifulSoup
+soup = BeautifulSoup(html_content, 'html.parser')
 
 # Find all failure rows
-failure_rows = tree.xpath("//tr[contains(@class, 'Failure')]")
+failure_rows = soup.find_all('tr', class_='Failure')
 
 # Prepare to write to output file
 output_file = 'extracted_failures.txt'
 
 with open(output_file, 'w', encoding='utf-8') as output:
     for row in failure_rows:
-        # Extract the test case name
-        test_case_name_elem = row.xpath(".//td[2]/a")
-        test_case_name = test_case_name_elem[0].get("name", "Unknown Test Case") if test_case_name_elem else "Unknown Test Case"
+        # Extract the test case name from the second <td> element's <a name> attribute
+        test_case_name = row.find_all('td')[1].find('a').get('name', 'Unknown Test Case')
 
         # Extract all test step names and their failure details
-        failure_details_elem = row.xpath(".//td[4]")  # Adjusting for the fourth column (0-indexed)
-        if not failure_details_elem:
-            output.write(f"Warning: No failure details found for Test Case: {test_case_name}\n")
-            output.write("-" * 40 + "\n")
-            continue
+        failure_details_html = row.find_all('td')[3]
+        failure_soup = BeautifulSoup(str(failure_details_html), 'html.parser')
 
-        failure_details_html = etree.tostring(failure_details_elem[0], encoding="unicode", method="html")
-        test_step_matches = re.findall(r'TestStep:\s*(\w+)', failure_details_html)
+        test_step_matches = re.findall(r'TestStep:\s*(\w+)', str(failure_details_html))
 
         if not test_step_matches:
             output.write(f"Warning: No test steps found for Test Case: {test_case_name}\n")
@@ -77,7 +73,7 @@ with open(output_file, 'w', encoding='utf-8') as output:
 
         for test_step_name in test_step_matches:
             # Extract the failure reason for each test step
-            failure_reason = extract_error_message(failure_details_html)
+            failure_reason = extract_error_message(failure_soup)
 
             # Write the extracted information to the output file
             output.write(f"Test Case Name: {test_case_name}\n")
