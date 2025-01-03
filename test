@@ -52,8 +52,8 @@ with open(consolidated_output_file, "w", encoding="utf-8") as output:
                 with open(file_path, "r", encoding="utf-8") as f:
                     file_content = f.read()
 
-                # Extract the response section
-                response_match = re.search(r"-------------Response------------------------\s*(.*)", file_content, re.DOTALL)
+                # Extract the response section using a flexible regex for separator lines
+                response_match = re.search(r"-+\s*Response\s*-+\s*(.*)", file_content, re.DOTALL)
                 if not response_match:
                     output.write(f"Test Suite: {test_suite_name}\n")
                     output.write(f"Test Case: {test_case_name}\n")
