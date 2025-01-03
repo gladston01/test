@@ -3,20 +3,16 @@ from bs4 import BeautifulSoup
 import re
 import argparse
 
-# Function to extract error messages from relevant tags
+# Function to extract error messages from relevant tags, including XML tags
 def extract_error_message(failure_soup):
-    # Define the list of specific error tags
+    # Define the list of specific error tags, including XML tags
     error_tags = [
         re.compile(r".*:errorText$"),  # Handles dynamic prefixes like <ns1:errorText>
         "messageText",
         "message",
         "SerErrorMessage",
+        "mml",  # Include mml tag for XML errors
     ]
-
-    # Debug: Print all available tags
-    print("Debug: Available tags in failure_soup:")
-    for tag in failure_soup.find_all(True):  # List all tags
-        print(f"Tag: {tag.name}, Content: {tag.get_text(strip=True)}")
 
     # Look for specific error tags
     for tag in error_tags:
@@ -26,7 +22,10 @@ def extract_error_message(failure_soup):
             found_tags = failure_soup.find_all(lambda t: t.name and tag.match(t.name))
 
         if found_tags:
-            return " | ".join(tag.get_text(strip=True) for tag in found_tags)
+            # Extract and clean text from found tags
+            error_messages = [found.get_text(strip=True) for found in found_tags]
+            if error_messages:
+                return " | ".join(error_messages)
 
     # If no specific error tags are found, return a default message
     return "No meaningful error message found."
