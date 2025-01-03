@@ -13,6 +13,11 @@ def extract_error_message(failure_soup):
         "SerErrorMessage",
     ]
 
+    # Debug: Print all tags in the current failure_soup
+    print("Debug: Available tags in failure_soup:")
+    for tag in failure_soup.find_all(True):  # Find all tags
+        print(tag.name)
+
     # Look for all matching tags in the soup
     for tag in error_tags:
         if isinstance(tag, str):
@@ -23,7 +28,7 @@ def extract_error_message(failure_soup):
         if found_tag:
             return found_tag.text.strip()
 
-    # Return a message if no specific tags match
+    # Return debug message if no tags are found
     return "No matching error tag found in provided HTML."
 
 # Set up argument parser
@@ -69,6 +74,8 @@ with open(output_file, 'w', encoding='utf-8') as output:
         for test_step_name in test_step_matches:
             # Extract the failure reason for each test step
             failure_reason = extract_error_message(failure_soup)
+            if failure_reason.startswith("No matching error tag"):
+                output.write(f"Debug: Failure details HTML: {failure_details_html}\n")
 
             # Write the extracted information to the output file
             output.write(f"Test Case Name: {test_case_name}\n")
