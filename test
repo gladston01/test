@@ -1,83 +1,77 @@
-import sys
-from bs4 import BeautifulSoup
+import os
 import re
 import argparse
 
-# Function to extract error messages from relevant tags, including XML tags
-def extract_error_message(failure_soup):
-    # Define the list of specific error tags, including XML tags
-    error_tags = [
-        re.compile(r".*:errorText$"),  # Handles dynamic prefixes like <ns1:errorText>
-        "messageText",
-        "message",
-        "SerErrorMessage",
-        "mml",  # Include mml tag for XML errors
+# Function to extract the failure reason from the response content
+def extract_failure_reason(response_content):
+    # Define the patterns for failure reasons
+    error_patterns = [
+        re.compile(r"<.*:errorText>(.*?)</.*:errorText>", re.DOTALL),
+        re.compile(r"<messageText>(.*?)</messageText>", re.DOTALL),
+        re.compile(r"<message>(.*?)</message>", re.DOTALL),
+        re.compile(r"<SerErrorMessage>(.*?)</SerErrorMessage>", re.DOTALL),
     ]
 
-    # Look for specific error tags
-    for tag in error_tags:
-        if isinstance(tag, str):
-            found_tags = failure_soup.find_all(tag)
-        else:  # Regex matching for dynamic tag names
-            found_tags = failure_soup.find_all(lambda t: t.name and tag.match(t.name))
+    for pattern in error_patterns:
+        match = pattern.search(response_content)
+        if match:
+            return match.group(1).strip()
 
-        if found_tags:
-            # Extract and clean text from found tags
-            error_messages = [found.get_text(strip=True) for found in found_tags]
-            if error_messages:
-                return " | ".join(error_messages)
-
-    # If no specific error tags are found, return a default message
-    return "No meaningful error message found."
+    return "No failure reason found."
 
 # Set up argument parser
-parser = argparse.ArgumentParser(description="Extract failure details from an HTML file.")
-parser.add_argument("--html-location", required=True, help="Path to the HTML file containing failure details.")
+parser = argparse.ArgumentParser(description="Extract failure details from text files.")
+parser.add_argument("--output-location", required=True, help="Path to the directory containing failure files.")
 args = parser.parse_args()
 
-input_file = args.html_location
+output_location = args.output_location
 
-# Read the input HTML file
-try:
-    with open(input_file, 'r', encoding='utf-8') as file:
-        html_content = file.read()
-except FileNotFoundError:
-    print(f"Error: File '{input_file}' not found.")
-    sys.exit(1)
+# Verify the directory exists
+if not os.path.isdir(output_location):
+    print(f"Error: The directory '{output_location}' does not exist.")
+    exit(1)
 
-# Parse the HTML content using BeautifulSoup
-soup = BeautifulSoup(html_content, 'html.parser')
+# Prepare to write to the consolidated output file
+consolidated_output_file = "consolidated_failures.txt"
 
-# Find all failure rows
-failure_rows = soup.find_all('tr', class_='Failure')
+with open(consolidated_output_file, "w", encoding="utf-8") as output:
+    # Find all files with "-FAIL.txt" in their names
+    for root, _, files in os.walk(output_location):
+        for file in files:
+            if "-FAIL.txt" in file:
+                # Extract TestSuiteName, TestCaseName, and testStepname from the file name
+                match = re.match(r"(.*)-(.*)-(.*)-\d+-FAIL\.txt", file)
+                if not match:
+                    print(f"Warning: Skipping file '{file}' due to unexpected name format.")
+                    continue
 
-# Prepare to write to output file
-output_file = 'extracted_failures.txt'
+                test_suite_name, test_case_name, test_step_name = match.groups()
 
-with open(output_file, 'w', encoding='utf-8') as output:
-    for row in failure_rows:
-        # Extract the test case name from the second <td> element's <a name> attribute
-        test_case_name = row.find_all('td')[1].find('a').get('name', 'Unknown Test Case')
+                # Read the file content
+                file_path = os.path.join(root, file)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read()
 
-        # Extract all test step names and their failure details
-        failure_details_html = row.find_all('td')[3]
-        failure_soup = BeautifulSoup(str(failure_details_html), 'html.parser')
+                # Extract the response section
+                response_match = re.search(r"-------------Response------------------------\s*(.*)", file_content, re.DOTALL)
+                if not response_match:
+                    output.write(f"Test Suite: {test_suite_name}\n")
+                    output.write(f"Test Case: {test_case_name}\n")
+                    output.write(f"Test Step: {test_step_name}\n")
+                    output.write("Failure Reason: No response section found.\n")
+                    output.write("-" * 40 + "\n")
+                    continue
 
-        test_step_matches = re.findall(r'TestStep:\s*(\w+)', str(failure_details_html))
+                response_content = response_match.group(1)
 
-        if not test_step_matches:
-            output.write(f"Warning: No test steps found for Test Case: {test_case_name}\n")
-            output.write("-" * 40 + "\n")
-            continue
+                # Extract the failure reason from the response
+                failure_reason = extract_failure_reason(response_content)
 
-        for test_step_name in test_step_matches:
-            # Extract the failure reason for each test step
-            failure_reason = extract_error_message(failure_soup)
+                # Write the extracted details to the consolidated output file
+                output.write(f"Test Suite: {test_suite_name}\n")
+                output.write(f"Test Case: {test_case_name}\n")
+                output.write(f"Test Step: {test_step_name}\n")
+                output.write(f"Failure Reason: {failure_reason}\n")
+                output.write("-" * 40 + "\n")
 
-            # Write the extracted information to the output file
-            output.write(f"Test Case Name: {test_case_name}\n")
-            output.write(f"Test Step Name: {test_step_name}\n")
-            output.write(f"Failure Reason: {failure_reason}\n")
-            output.write("-" * 40 + "\n")
-
-print(f"Extraction completed. Check the file '{output_file}' for details.")
+print(f"Extraction completed. Check the file '{consolidated_output_file}' for details.")
