@@ -4,19 +4,23 @@ import re
 import argparse
 
 # Function to extract error messages from relevant tags
-def extract_error_message(html_segment):
+def extract_error_message(soup):
     # Define the list of possible error tags
     error_tags = [
-        re.compile(r'<.*:errorText>(.*?)</.*:errorText>', re.DOTALL),
-        re.compile(r'<messageText>(.*?)</messageText>', re.DOTALL),
-        re.compile(r'<message>(.*?)</message>', re.DOTALL),
-        re.compile(r'<SerErrorMessage>(.*?)</SerErrorMessage>', re.DOTALL),
+        {"tag": re.compile(r".*:errorText$"), "desc": "errorText"},
+        {"tag": "messageText", "desc": "messageText"},
+        {"tag": "message", "desc": "message"},
+        {"tag": "SerErrorMessage", "desc": "SerErrorMessage"},
     ]
 
-    for tag_pattern in error_tags:
-        match = tag_pattern.search(html_segment)
-        if match:
-            return match.group(1).strip()
+    for tag_info in error_tags:
+        if isinstance(tag_info["tag"], str):
+            tag = soup.find(tag_info["tag"])
+        else:  # Regex matching for dynamic tags
+            tag = soup.find(lambda t: t.name and tag_info["tag"].match(t.name))
+
+        if tag:
+            return tag.text.strip()
     return "Unknown failure reason (no matching tags found)"
 
 # Set up argument parser
@@ -50,6 +54,8 @@ with open(output_file, 'w', encoding='utf-8') as output:
 
         # Extract all test step names and their failure details
         failure_details_html = row.find_all('td')[3]
+        failure_soup = BeautifulSoup(str(failure_details_html), 'html.parser')
+
         test_step_matches = re.findall(r'TestStep:\s*(\w+)', str(failure_details_html))
 
         if not test_step_matches:
@@ -59,7 +65,7 @@ with open(output_file, 'w', encoding='utf-8') as output:
 
         for test_step_name in test_step_matches:
             # Extract the failure reason for each test step
-            failure_reason = extract_error_message(str(failure_details_html))
+            failure_reason = extract_error_message(failure_soup)
             if failure_reason.startswith("Unknown"):
                 output.write(f"Debug: Failure details HTML: {failure_details_html}\n")
 
