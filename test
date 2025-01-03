@@ -22,13 +22,12 @@ def extract_error_message(failure_soup):
 
         if found_tag:
             text = found_tag.text.strip()
-            # Filter out overly long messages (like full request/response)
-            if len(text) < 300:  # Adjust the length threshold as needed
+            # Ensure the extracted text is meaningful
+            if text:
                 return text
-            else:
-                return "Error message is too lengthy to display."
 
-    return "No meaningful error message found."
+    # If no specific error tags are found
+    return "No error message found in specified tags."
 
 # Set up argument parser
 parser = argparse.ArgumentParser(description="Extract failure details from an HTML file.")
@@ -63,7 +62,7 @@ with open(output_file, 'w', encoding='utf-8') as output:
         failure_details_html = row.find_all('td')[3]
         failure_soup = BeautifulSoup(str(failure_details_html), 'html.parser')
 
-        test_step_matches = re.findall(r'TestStep:\\s*(\\w+)', str(failure_details_html))
+        test_step_matches = re.findall(r'TestStep:\s*(\w+)', str(failure_details_html))
 
         if not test_step_matches:
             output.write(f"Warning: No test steps found for Test Case: {test_case_name}\n")
