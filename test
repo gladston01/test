@@ -17,7 +17,7 @@ def extract_error_message(html_segment):
         match = tag_pattern.search(html_segment)
         if match:
             return match.group(1).strip()
-    return "Unknown failure reason"
+    return "Unknown failure reason (no matching tags found)"
 
 # Set up argument parser
 parser = argparse.ArgumentParser(description="Extract failure details from an HTML file.")
@@ -52,9 +52,16 @@ with open(output_file, 'w', encoding='utf-8') as output:
         failure_details_html = row.find_all('td')[3]
         test_step_matches = re.findall(r'TestStep:\s*(\w+)', str(failure_details_html))
 
+        if not test_step_matches:
+            output.write(f"Warning: No test steps found for Test Case: {test_case_name}\n")
+            output.write("-" * 40 + "\n")
+            continue
+
         for test_step_name in test_step_matches:
             # Extract the failure reason for each test step
             failure_reason = extract_error_message(str(failure_details_html))
+            if failure_reason.startswith("Unknown"):
+                output.write(f"Debug: Failure details HTML: {failure_details_html}\n")
 
             # Write the extracted information to the output file
             output.write(f"Test Case Name: {test_case_name}\n")
