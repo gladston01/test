@@ -1,1 +1,66 @@
 
+import sys
+from bs4 import BeautifulSoup
+import re
+import argparse
+
+# Function to extract error messages from relevant tags
+def extract_error_message(html_segment):
+    # Define the list of possible error tags
+    error_tags = [
+        re.compile(r'<.*:errorText>(.*?)</.*:errorText>', re.DOTALL),
+        re.compile(r'<messageText>(.*?)</messageText>', re.DOTALL),
+        re.compile(r'<message>(.*?)</message>', re.DOTALL),
+        re.compile(r'<SerErrorMessage>(.*?)</SerErrorMessage>', re.DOTALL),
+    ]
+
+    for tag_pattern in error_tags:
+        match = tag_pattern.search(html_segment)
+        if match:
+            return match.group(1).strip()
+    return "Unknown failure reason"
+
+# Set up argument parser
+parser = argparse.ArgumentParser(description="Extract failure details from an HTML file.")
+parser.add_argument("--html-location", required=True, help="Path to the HTML file containing failure details.")
+args = parser.parse_args()
+
+input_file = args.html_location
+
+# Read the input HTML file
+try:
+    with open(input_file, 'r', encoding='utf-8') as file:
+        html_content = file.read()
+except FileNotFoundError:
+    print(f"Error: File '{input_file}' not found.")
+    sys.exit(1)
+
+# Parse the HTML content using BeautifulSoup
+soup = BeautifulSoup(html_content, 'html.parser')
+
+# Find all failure rows
+failure_rows = soup.find_all('tr', class_='Failure')
+
+# Prepare to write to output file
+output_file = 'extracted_failures.txt'
+
+with open(output_file, 'w', encoding='utf-8') as output:
+    for row in failure_rows:
+        # Extract the test case name from the second <td> element's <a name> attribute
+        test_case_name = row.find_all('td')[1].find('a').get('name', 'Unknown Test Case')
+
+        # Extract the test step name and failure details
+        failure_details_html = row.find_all('td')[3]
+        test_step_match = re.search(r'TestStep:\s*(\w+)', str(failure_details_html))
+        test_step_name = test_step_match.group(1) if test_step_match else 'Unknown Test Step'
+
+        # Extract the failure reason
+        failure_reason = extract_error_message(str(failure_details_html))
+
+        # Write the extracted information to the output file
+        output.write(f"Test Case Name: {test_case_name}\n")
+        output.write(f"Test Step Name: {test_step_name}\n")
+        output.write(f"Failure Reason: {failure_reason}\n")
+        output.write("-" * 40 + "\n")
+
+print(f"Extraction completed. Check the file '{output_file}' for details.")
